@@ -2,6 +2,7 @@
   "name": "bangladesh-voter-frontend",
   "version": "1.0.0",
   "private": true,
+  "homepage": "https://nonetitle3.github.io/bangladesh-voter-python/",
   "dependencies": {
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.1.0",

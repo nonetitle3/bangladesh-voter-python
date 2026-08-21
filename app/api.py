@@ -3,7 +3,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, UploadFile, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
-from sqlalchemy import func, or_, text
+from sqlalchemy import func, or_, text, inspect
 from sqlalchemy.orm import Session
 from .database import Base, engine, get_db
 from .models import Document, VoterRecord
@@ -15,12 +15,12 @@ router=APIRouter(prefix="/api")
 UPLOAD_DIR=Path(os.getenv("UPLOAD_DIR","uploads")); UPLOAD_DIR.mkdir(parents=True,exist_ok=True)
 Base.metadata.create_all(bind=engine)
 
-# Backward-compatible schema upgrade for existing databases.
+# Backward-compatible schema upgrade for databases created before pdf_data existed.
 try:
-    with engine.begin() as conn:
-        cols = [r[1] for r in conn.execute(text("PRAGMA table_info(documents)"))]
-        if "pdf_data" not in cols:
-            conn.execute(text("ALTER TABLE documents ADD COLUMN pdf_data BLOB"))
+    columns={c["name"] for c in inspect(engine).get_columns("documents")}
+    if "pdf_data" not in columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE documents ADD COLUMN pdf_data BYTEA" if engine.dialect.name == "postgresql" else "ALTER TABLE documents ADD COLUMN pdf_data BLOB"))
 except Exception:
     pass
 
@@ -41,9 +41,7 @@ async def upload_pdfs(files:list[UploadFile]=File(...),user=Depends(admin_user),
     created=[]
     for upload in files:
         if not upload.filename.lower().endswith(".pdf"): continue
-        safe=Path(upload.filename).name
-        data=await upload.read()
-        target=UPLOAD_DIR/safe
+        safe=Path(upload.filename).name; data=await upload.read(); target=UPLOAD_DIR/safe
         if target.exists(): target=UPLOAD_DIR/f"{Path(safe).stem}_{len(created)+1}.pdf"
         target.write_bytes(data)
         doc=Document(filename=safe,stored_path=str(target),pdf_data=data,status="processing"); db.add(doc); db.commit(); db.refresh(doc)
@@ -63,8 +61,7 @@ def reprocess_document(document_id:int,user=Depends(admin_user),db:Session=Depen
     path=Path(doc.stored_path) if doc.stored_path else None
     if not path or not path.exists():
         if doc.pdf_data:
-            path=UPLOAD_DIR/f"reprocess_{doc.id}_{Path(doc.filename).name}"
-            path.write_bytes(doc.pdf_data)
+            path=UPLOAD_DIR/f"reprocess_{doc.id}_{Path(doc.filename).name}"; path.write_bytes(doc.pdf_data)
         else:
             raise HTTPException(409,"Original PDF is not available for re-OCR")
     old_status=doc.status

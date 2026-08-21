@@ -54,10 +54,15 @@ def documents(user=Depends(admin_user),db:Session=Depends(get_db)):
 def search(q:str|None=None,name:str|None=None,father_name:str|None=None,mother_name:str|None=None,voter_id:str|None=None,district:str|None=None,upazila:str|None=None,union_name:str|None=None,ward:str|None=None,occupation:str|None=None,gender:str|None=None,page:int=1,page_size:int=50,db:Session=Depends(get_db),user=Depends(admin_user)):
     query=db.query(VoterRecord)
     if q:
-        term=f"%{q}%"; query=query.filter(or_(VoterRecord.name.ilike(term),VoterRecord.father_name.ilike(term),VoterRecord.mother_name.ilike(term),VoterRecord.voter_id.ilike(term),VoterRecord.district.ilike(term),VoterRecord.address.ilike(term)))
+        term=f"%{q}%"
+        query=query.filter(or_(VoterRecord.name.ilike(term),VoterRecord.father_name.ilike(term),VoterRecord.mother_name.ilike(term),VoterRecord.voter_id.ilike(term),VoterRecord.district.ilike(term),VoterRecord.address.ilike(term),VoterRecord.raw_text.ilike(term)))
     for col,val in [(VoterRecord.name,name),(VoterRecord.father_name,father_name),(VoterRecord.mother_name,mother_name),(VoterRecord.voter_id,voter_id),(VoterRecord.district,district),(VoterRecord.upazila,upazila),(VoterRecord.union_name,union_name),(VoterRecord.ward,ward),(VoterRecord.occupation,occupation)]:
-        if val: query=query.filter(col.ilike(f"%{val}%"))
-    if gender: query=query.filter(VoterRecord.gender==gender)
+        if val:
+            term=f"%{val}%"
+            query=query.filter(or_(col.ilike(term),VoterRecord.raw_text.ilike(term)))
+    if gender:
+        term=f"%{gender}%"
+        query=query.filter(or_(VoterRecord.gender.ilike(term),VoterRecord.raw_text.ilike(term)))
     page=max(1,page); page_size=min(max(1,page_size),200)
     total=query.count(); rows=query.order_by(VoterRecord.id.desc()).offset((page-1)*page_size).limit(page_size).all()
     cols=[c.name for c in VoterRecord.__table__.columns]

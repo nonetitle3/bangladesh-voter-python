@@ -13,6 +13,15 @@ services:
       - key: JWT_SECRET
         generateValue: true
       - key: DATABASE_URL
-        sync: false
+        fromDatabase:
+          name: bangladesh-voter-db
+          property: connectionString
       - key: UPLOAD_DIR
         value: /tmp/uploads
+
+databases:
+  - name: bangladesh-voter-db
+    databaseName: voter
+    user: voter
+    plan: free
+    region: oregon

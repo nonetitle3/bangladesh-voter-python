@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <script>
+    (function () {
+      var l = window.location;
+      var repo = '/bangladesh-voter-python';
+      if (l.pathname.indexOf(repo) === 0) {
+        var path = l.pathname.slice(repo.length) || '/';
+        sessionStorage.redirect = repo + '/?p=' + encodeURIComponent(path + l.search + l.hash);
+      }
+      l.replace(l.protocol + '//' + l.host + repo + '/');
+    })();
+  </script>
+</head>
+<body>Loading…</body>
+</html>

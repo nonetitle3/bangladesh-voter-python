@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Boolean, Column, Date, DateTime, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import Boolean, Column, Date, DateTime, Float, ForeignKey, Index, Integer, String, Text, LargeBinary
 from sqlalchemy.orm import relationship
 from .database import Base
 
@@ -18,6 +18,8 @@ class Document(Base):
     id = Column(Integer, primary_key=True)
     filename = Column(String(500), nullable=False)
     stored_path = Column(String(1000), nullable=False)
+    # A database copy makes uploaded PDFs survive Render restarts/redeploys.
+    pdf_data = Column(LargeBinary, nullable=True)
     page_count = Column(Integer, default=0)
     status = Column(String(30), default="pending", nullable=False, index=True)
     ocr_used = Column(Boolean, default=False, nullable=False)

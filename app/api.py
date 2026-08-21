@@ -14,8 +14,6 @@ from .exporter import query_records, csv_bytes, xlsx_bytes
 router=APIRouter(prefix="/api")
 UPLOAD_DIR=Path(os.getenv("UPLOAD_DIR","uploads")); UPLOAD_DIR.mkdir(parents=True,exist_ok=True)
 Base.metadata.create_all(bind=engine)
-
-# Backward-compatible schema upgrade for databases created before pdf_data existed.
 try:
     columns={c["name"] for c in inspect(engine).get_columns("documents")}
     if "pdf_data" not in columns:
@@ -36,6 +34,19 @@ def login(data:Login,db:Session=Depends(get_db)):
 def config_status():
     return {"ADMIN_USERNAME":bool(os.getenv("ADMIN_USERNAME")),"ADMIN_PASSWORD":bool(os.getenv("ADMIN_PASSWORD")),"ADMIN_PASSWORD_HASH":bool(os.getenv("ADMIN_PASSWORD_HASH")),"JWT_SECRET":bool(os.getenv("JWT_SECRET"))}
 
+def _process_into_document(doc, db):
+    path=Path(doc.stored_path) if doc.stored_path else None
+    if not path or not path.exists():
+        if doc.pdf_data:
+            path=UPLOAD_DIR/f"document_{doc.id}_{Path(doc.filename).name}"; path.write_bytes(doc.pdf_data)
+        else: raise HTTPException(409,"Original PDF is not available")
+    records,ocr,pages=process_pdf(path)
+    db.query(VoterRecord).filter(VoterRecord.document_id==doc.id).delete(synchronize_session=False)
+    for r in records:
+        r.pop("ocr_used",None); r.update(document_id=doc.id,pdf_filename=doc.filename); db.add(VoterRecord(**r))
+    doc.page_count=pages; doc.ocr_used=ocr; doc.status="completed"; doc.error_msg=None; db.commit()
+    return records,pages,ocr
+
 @router.post("/admin/upload-pdf")
 async def upload_pdfs(files:list[UploadFile]=File(...),user=Depends(admin_user),db:Session=Depends(get_db)):
     created=[]
@@ -49,7 +60,7 @@ async def upload_pdfs(files:list[UploadFile]=File(...),user=Depends(admin_user),
             records,ocr,pages=process_pdf(target); doc.page_count=pages; doc.ocr_used=ocr; doc.error_msg=None
             for r in records:
                 r.pop("ocr_used",None); r.update(document_id=doc.id,pdf_filename=safe); db.add(VoterRecord(**r))
-            doc.status="completed"; db.commit(); created.append({"id":doc.id,"filename":safe,"records":len(records),"ocr_used":ocr,"status":"completed"})
+            doc.status="completed"; db.commit(); created.append({"id":doc.id,"filename":safe,"records":len(records),"ocr_used":ocr,"pages":pages,"status":"completed"})
         except Exception as e:
             db.rollback(); doc=db.get(Document,doc.id); doc.status="failed"; doc.error_msg=str(e)[:2000]; db.commit(); created.append({"id":doc.id,"filename":safe,"status":"failed","error":doc.error_msg})
     return {"status":"ok","message":"PDF processing completed","documents":created}
@@ -58,24 +69,26 @@ async def upload_pdfs(files:list[UploadFile]=File(...),user=Depends(admin_user),
 def reprocess_document(document_id:int,user=Depends(admin_user),db:Session=Depends(get_db)):
     doc=db.get(Document,document_id)
     if not doc: raise HTTPException(404,"Document not found")
-    path=Path(doc.stored_path) if doc.stored_path else None
-    if not path or not path.exists():
-        if doc.pdf_data:
-            path=UPLOAD_DIR/f"reprocess_{doc.id}_{Path(doc.filename).name}"; path.write_bytes(doc.pdf_data)
-        else:
-            raise HTTPException(409,"Original PDF is not available for re-OCR")
     old_status=doc.status
     try:
         doc.status="reprocessing"; doc.error_msg=None; db.commit()
-        records,ocr,pages=process_pdf(path)
-        db.query(VoterRecord).filter(VoterRecord.document_id==doc.id).delete(synchronize_session=False)
-        for r in records:
-            r.pop("ocr_used",None); r.update(document_id=doc.id,pdf_filename=doc.filename); db.add(VoterRecord(**r))
-        doc.page_count=pages; doc.ocr_used=ocr; doc.status="completed"; doc.error_msg=None; db.commit()
+        records,pages,ocr=_process_into_document(doc,db)
         return {"status":"ok","id":doc.id,"filename":doc.filename,"records":len(records),"pages":pages,"ocr_used":ocr}
+    except HTTPException: raise
     except Exception as e:
         db.rollback(); doc=db.get(Document,document_id); doc.status=old_status or "failed"; doc.error_msg=str(e)[:2000]; db.commit()
         raise HTTPException(500,f"Re-OCR failed: {doc.error_msg}")
+
+@router.delete("/admin/documents/{document_id}")
+def delete_document(document_id:int,user=Depends(admin_user),db:Session=Depends(get_db)):
+    doc=db.get(Document,document_id)
+    if not doc: raise HTTPException(404,"Document not found")
+    path=Path(doc.stored_path) if doc.stored_path else None
+    db.delete(doc); db.commit()
+    if path and path.exists():
+        try: path.unlink()
+        except OSError: pass
+    return {"status":"ok","message":"Document and its voter records deleted","id":document_id}
 
 @router.get("/admin/documents")
 def documents(user=Depends(admin_user),db:Session=Depends(get_db)):

@@ -5,6 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#059669" />
     <title>ভোটার তথ্য অনুসন্ধান</title>
+    <script>
+      (function () {
+        var params = new URLSearchParams(window.location.search);
+        var redirect = params.get('p');
+        if (redirect) {
+          window.history.replaceState(null, '', '/bangladesh-voter-python' + decodeURIComponent(redirect));
+        }
+      })();
+    </script>
   </head>
   <body>
     <noscript>এই অ্যাপ চালাতে JavaScript চালু করুন।</noscript>

@@ -3,7 +3,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, UploadFile, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, text
 from sqlalchemy.orm import Session
 from .database import Base, engine, get_db
 from .models import Document, VoterRecord
@@ -14,6 +14,15 @@ from .exporter import query_records, csv_bytes, xlsx_bytes
 router=APIRouter(prefix="/api")
 UPLOAD_DIR=Path(os.getenv("UPLOAD_DIR","uploads")); UPLOAD_DIR.mkdir(parents=True,exist_ok=True)
 Base.metadata.create_all(bind=engine)
+
+# Backward-compatible schema upgrade for existing databases.
+try:
+    with engine.begin() as conn:
+        cols = [r[1] for r in conn.execute(text("PRAGMA table_info(documents)"))]
+        if "pdf_data" not in cols:
+            conn.execute(text("ALTER TABLE documents ADD COLUMN pdf_data BLOB"))
+except Exception:
+    pass
 
 class Login(BaseModel): username:str; password:str
 
@@ -32,12 +41,14 @@ async def upload_pdfs(files:list[UploadFile]=File(...),user=Depends(admin_user),
     created=[]
     for upload in files:
         if not upload.filename.lower().endswith(".pdf"): continue
-        safe=Path(upload.filename).name; target=UPLOAD_DIR/safe
+        safe=Path(upload.filename).name
+        data=await upload.read()
+        target=UPLOAD_DIR/safe
         if target.exists(): target=UPLOAD_DIR/f"{Path(safe).stem}_{len(created)+1}.pdf"
-        with target.open("wb") as out: shutil.copyfileobj(upload.file,out)
-        doc=Document(filename=safe,stored_path=str(target),status="processing"); db.add(doc); db.commit(); db.refresh(doc)
+        target.write_bytes(data)
+        doc=Document(filename=safe,stored_path=str(target),pdf_data=data,status="processing"); db.add(doc); db.commit(); db.refresh(doc)
         try:
-            records,ocr,pages=process_pdf(target); doc.page_count=pages; doc.ocr_used=ocr
+            records,ocr,pages=process_pdf(target); doc.page_count=pages; doc.ocr_used=ocr; doc.error_msg=None
             for r in records:
                 r.pop("ocr_used",None); r.update(document_id=doc.id,pdf_filename=safe); db.add(VoterRecord(**r))
             doc.status="completed"; db.commit(); created.append({"id":doc.id,"filename":safe,"records":len(records),"ocr_used":ocr,"status":"completed"})
@@ -45,27 +56,46 @@ async def upload_pdfs(files:list[UploadFile]=File(...),user=Depends(admin_user),
             db.rollback(); doc=db.get(Document,doc.id); doc.status="failed"; doc.error_msg=str(e)[:2000]; db.commit(); created.append({"id":doc.id,"filename":safe,"status":"failed","error":doc.error_msg})
     return {"status":"ok","message":"PDF processing completed","documents":created}
 
+@router.post("/admin/documents/{document_id}/reprocess")
+def reprocess_document(document_id:int,user=Depends(admin_user),db:Session=Depends(get_db)):
+    doc=db.get(Document,document_id)
+    if not doc: raise HTTPException(404,"Document not found")
+    path=Path(doc.stored_path) if doc.stored_path else None
+    if not path or not path.exists():
+        if doc.pdf_data:
+            path=UPLOAD_DIR/f"reprocess_{doc.id}_{Path(doc.filename).name}"
+            path.write_bytes(doc.pdf_data)
+        else:
+            raise HTTPException(409,"Original PDF is not available for re-OCR")
+    old_status=doc.status
+    try:
+        doc.status="reprocessing"; doc.error_msg=None; db.commit()
+        records,ocr,pages=process_pdf(path)
+        db.query(VoterRecord).filter(VoterRecord.document_id==doc.id).delete(synchronize_session=False)
+        for r in records:
+            r.pop("ocr_used",None); r.update(document_id=doc.id,pdf_filename=doc.filename); db.add(VoterRecord(**r))
+        doc.page_count=pages; doc.ocr_used=ocr; doc.status="completed"; doc.error_msg=None; db.commit()
+        return {"status":"ok","id":doc.id,"filename":doc.filename,"records":len(records),"pages":pages,"ocr_used":ocr}
+    except Exception as e:
+        db.rollback(); doc=db.get(Document,document_id); doc.status=old_status or "failed"; doc.error_msg=str(e)[:2000]; db.commit()
+        raise HTTPException(500,f"Re-OCR failed: {doc.error_msg}")
+
 @router.get("/admin/documents")
 def documents(user=Depends(admin_user),db:Session=Depends(get_db)):
     docs=db.query(Document).order_by(Document.uploaded_at.desc()).limit(100).all()
-    return [{"id":d.id,"filename":d.filename,"page_count":d.page_count,"status":d.status,"ocr_used":d.ocr_used,"error_msg":d.error_msg,"uploaded_at":d.uploaded_at} for d in docs]
+    return [{"id":d.id,"filename":d.filename,"page_count":d.page_count,"status":d.status,"ocr_used":d.ocr_used,"error_msg":d.error_msg,"uploaded_at":d.uploaded_at,"has_pdf":bool(d.pdf_data) or bool(d.stored_path and Path(d.stored_path).exists())} for d in docs]
 
 @router.get("/voter-search/search")
 def search(q:str|None=None,name:str|None=None,father_name:str|None=None,mother_name:str|None=None,voter_id:str|None=None,district:str|None=None,upazila:str|None=None,union_name:str|None=None,ward:str|None=None,occupation:str|None=None,gender:str|None=None,page:int=1,page_size:int=50,db:Session=Depends(get_db),user=Depends(admin_user)):
     query=db.query(VoterRecord)
     if q:
-        term=f"%{q}%"
-        query=query.filter(or_(VoterRecord.name.ilike(term),VoterRecord.father_name.ilike(term),VoterRecord.mother_name.ilike(term),VoterRecord.voter_id.ilike(term),VoterRecord.district.ilike(term),VoterRecord.address.ilike(term),VoterRecord.raw_text.ilike(term)))
+        term=f"%{q}%"; query=query.filter(or_(VoterRecord.name.ilike(term),VoterRecord.father_name.ilike(term),VoterRecord.mother_name.ilike(term),VoterRecord.voter_id.ilike(term),VoterRecord.district.ilike(term),VoterRecord.address.ilike(term),VoterRecord.raw_text.ilike(term)))
     for col,val in [(VoterRecord.name,name),(VoterRecord.father_name,father_name),(VoterRecord.mother_name,mother_name),(VoterRecord.voter_id,voter_id),(VoterRecord.district,district),(VoterRecord.upazila,upazila),(VoterRecord.union_name,union_name),(VoterRecord.ward,ward),(VoterRecord.occupation,occupation)]:
         if val:
-            term=f"%{val}%"
-            query=query.filter(or_(col.ilike(term),VoterRecord.raw_text.ilike(term)))
+            term=f"%{val}%"; query=query.filter(or_(col.ilike(term),VoterRecord.raw_text.ilike(term)))
     if gender:
-        term=f"%{gender}%"
-        query=query.filter(or_(VoterRecord.gender.ilike(term),VoterRecord.raw_text.ilike(term)))
-    page=max(1,page); page_size=min(max(1,page_size),200)
-    total=query.count(); rows=query.order_by(VoterRecord.id.desc()).offset((page-1)*page_size).limit(page_size).all()
-    cols=[c.name for c in VoterRecord.__table__.columns]
+        term=f"%{gender}%"; query=query.filter(or_(VoterRecord.gender.ilike(term),VoterRecord.raw_text.ilike(term)))
+    page=max(1,page); page_size=min(max(1,page_size),200); total=query.count(); rows=query.order_by(VoterRecord.id.desc()).offset((page-1)*page_size).limit(page_size).all(); cols=[c.name for c in VoterRecord.__table__.columns]
     return {"records":[{c:getattr(r,c) for c in cols} for r in rows],"total_count":total,"page":page,"page_size":page_size}
 
 @router.get("/voter-search/stats")

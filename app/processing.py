@@ -80,10 +80,11 @@ def split_voters(text):
 def process_pdf(file_path):
     results=[]; any_ocr=False
     with fitz.open(file_path) as doc:
+        page_count = len(doc)
         for page_number,page in enumerate(doc,1):
             text,ocr=extract_page(page); any_ocr |= ocr
             for chunk in split_voters(text):
                 if len(re.sub(r"\s+", "", chunk)) < 15: continue
                 record=parse_record(chunk); record.update({"page_number":page_number,"ocr_used":ocr,"confidence":0.75 if ocr else 0.95})
                 results.append(record)
-    return results, any_ocr, len(doc)
+    return results, any_ocr, page_count

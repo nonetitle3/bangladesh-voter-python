@@ -18,7 +18,8 @@ class Document(Base):
     id = Column(Integer, primary_key=True)
     filename = Column(String(500), nullable=False)
     stored_path = Column(String(1000), nullable=False)
-    # A database copy makes uploaded PDFs survive Render restarts/redeploys.
+    storage_key = Column(String(1200), nullable=True, index=True)
+    # Legacy fallback for previously uploaded small PDFs. New large PDFs use object storage.
     pdf_data = Column(LargeBinary, nullable=True)
     page_count = Column(Integer, default=0)
     status = Column(String(30), default="pending", nullable=False, index=True)
@@ -52,7 +53,7 @@ class VoterRecord(Base):
     raw_text = Column(Text)
     confidence = Column(Float)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    document = relationship("Document", back_populates="records")
+    document = relationship("VoterRecord", back_populates="document")
     __table_args__ = (
         Index("ix_voter_name_father", "name", "father_name"),
         Index("ix_voter_district_upazila", "district", "upazila"),

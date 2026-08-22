@@ -6,7 +6,7 @@ from .database import Base
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True)
-    username = Column(String(100), unique=True, nullable=False, index=True)
+    username = Column(String(100), unique=True, index=True, nullable=False)
     email = Column(String(255), unique=True, nullable=True)
     password = Column(String(255), nullable=False)
     role = Column(String(20), default="viewer", nullable=False)
@@ -53,7 +53,7 @@ class VoterRecord(Base):
     raw_text = Column(Text)
     confidence = Column(Float)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    document = relationship("VoterRecord", back_populates="document")
+    document = relationship("Document", back_populates="records")
     __table_args__ = (
         Index("ix_voter_name_father", "name", "father_name"),
         Index("ix_voter_district_upazila", "district", "upazila"),

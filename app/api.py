@@ -1,11 +1,11 @@
 import os, shutil
 from pathlib import Path
-from fastapi import APIRouter, Depends, File, UploadFile, HTTPException
+from fastapi import APIRouter, Depends, File, UploadFile, HTTPException, BackgroundTasks
 from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import func, or_, text, inspect
 from sqlalchemy.orm import Session
-from .database import Base, engine, get_db
+from .database import Base, engine, get_db, SessionLocal
 from .models import Document, VoterRecord
 from .auth import admin_user, authenticate, ensure_admin, make_token
 from .processing import process_pdf
@@ -16,11 +16,11 @@ UPLOAD_DIR=Path(os.getenv("UPLOAD_DIR","uploads")); UPLOAD_DIR.mkdir(parents=Tru
 Base.metadata.create_all(bind=engine)
 try:
     columns={c["name"] for c in inspect(engine).get_columns("documents")}
-    if "pdf_data" not in columns:
-        with engine.begin() as conn:
-            conn.execute(text("ALTER TABLE documents ADD COLUMN pdf_data BYTEA" if engine.dialect.name == "postgresql" else "ALTER TABLE documents ADD COLUMN pdf_data BLOB"))
-except Exception:
-    pass
+    wanted={"pdf_data":"BYTEA" if engine.dialect.name=="postgresql" else "BLOB","progress_percent":"INTEGER DEFAULT 0","current_page":"INTEGER DEFAULT 0","total_pages":"INTEGER DEFAULT 0","current_stage":"VARCHAR(100) DEFAULT 'queued'","records_found":"INTEGER DEFAULT 0"}
+    with engine.begin() as conn:
+        for name,typ in wanted.items():
+            if name not in columns: conn.execute(text(f"ALTER TABLE documents ADD COLUMN {name} {typ}"))
+except Exception: pass
 
 class Login(BaseModel): username:str; password:str
 
@@ -34,66 +34,68 @@ def login(data:Login,db:Session=Depends(get_db)):
 def config_status():
     return {"ADMIN_USERNAME":bool(os.getenv("ADMIN_USERNAME")),"ADMIN_PASSWORD":bool(os.getenv("ADMIN_PASSWORD")),"ADMIN_PASSWORD_HASH":bool(os.getenv("ADMIN_PASSWORD_HASH")),"JWT_SECRET":bool(os.getenv("JWT_SECRET"))}
 
-def _process_into_document(doc, db):
-    path=Path(doc.stored_path) if doc.stored_path else None
-    if not path or not path.exists():
-        if doc.pdf_data:
-            path=UPLOAD_DIR/f"document_{doc.id}_{Path(doc.filename).name}"; path.write_bytes(doc.pdf_data)
-        else: raise HTTPException(409,"Original PDF is not available")
-    records,ocr,pages=process_pdf(path)
-    db.query(VoterRecord).filter(VoterRecord.document_id==doc.id).delete(synchronize_session=False)
-    for r in records:
-        r.pop("ocr_used",None); r.update(document_id=doc.id,pdf_filename=doc.filename); db.add(VoterRecord(**r))
-    doc.page_count=pages; doc.ocr_used=ocr; doc.status="completed"; doc.error_msg=None; db.commit()
-    return records,pages,ocr
+def _set_progress(db,doc,page,total,stage,records=0):
+    doc.current_page=page; doc.total_pages=total; doc.progress_percent=0 if not total else min(100,round(page*100/total)); doc.current_stage=stage; doc.records_found=records; db.commit()
+
+def _run_document(document_id):
+    db=SessionLocal(); doc=None
+    try:
+        doc=db.get(Document,document_id)
+        if not doc:return
+        path=Path(doc.stored_path) if doc.stored_path else None
+        if not path or not path.exists():
+            if doc.pdf_data:
+                path=UPLOAD_DIR/f"document_{doc.id}_{Path(doc.filename).name}"; path.write_bytes(doc.pdf_data)
+            else: raise RuntimeError("Original PDF is not available")
+        doc.status="processing"; doc.progress_percent=0; doc.current_page=0; doc.current_stage="opening PDF"; doc.records_found=0; db.commit()
+        def cb(page,total,stage,records): _set_progress(db,doc,page,total,stage,records)
+        records,ocr,pages=process_pdf(path,progress_callback=cb)
+        _set_progress(db,doc,pages,pages,'saving records',len(records))
+        db.query(VoterRecord).filter(VoterRecord.document_id==doc.id).delete(synchronize_session=False)
+        for r in records:
+            r.pop("ocr_used",None); r.update(document_id=doc.id,pdf_filename=doc.filename); db.add(VoterRecord(**r))
+        doc.page_count=pages; doc.ocr_used=ocr; doc.status="completed"; doc.error_msg=None; doc.progress_percent=100; doc.current_page=pages; doc.total_pages=pages; doc.current_stage="completed"; doc.records_found=len(records); db.commit()
+    except Exception as e:
+        db.rollback(); doc=db.get(Document,document_id)
+        if doc:
+            doc.status="failed"; doc.error_msg=str(e)[:2000]; doc.current_stage="failed"; db.commit()
+    finally: db.close()
 
 @router.post("/admin/upload-pdf")
-async def upload_pdfs(files:list[UploadFile]=File(...),user=Depends(admin_user),db:Session=Depends(get_db)):
+async def upload_pdfs(background_tasks:BackgroundTasks,files:list[UploadFile]=File(...),user=Depends(admin_user),db:Session=Depends(get_db)):
     created=[]
     for upload in files:
         if not upload.filename.lower().endswith(".pdf"): continue
         safe=Path(upload.filename).name; data=await upload.read(); target=UPLOAD_DIR/safe
         if target.exists(): target=UPLOAD_DIR/f"{Path(safe).stem}_{len(created)+1}.pdf"
         target.write_bytes(data)
-        doc=Document(filename=safe,stored_path=str(target),pdf_data=data,status="processing"); db.add(doc); db.commit(); db.refresh(doc)
-        try:
-            records,ocr,pages=process_pdf(target); doc.page_count=pages; doc.ocr_used=ocr; doc.error_msg=None
-            for r in records:
-                r.pop("ocr_used",None); r.update(document_id=doc.id,pdf_filename=safe); db.add(VoterRecord(**r))
-            doc.status="completed"; db.commit(); created.append({"id":doc.id,"filename":safe,"records":len(records),"ocr_used":ocr,"pages":pages,"status":"completed"})
-        except Exception as e:
-            db.rollback(); doc=db.get(Document,doc.id); doc.status="failed"; doc.error_msg=str(e)[:2000]; db.commit(); created.append({"id":doc.id,"filename":safe,"status":"failed","error":doc.error_msg})
-    return {"status":"ok","message":"PDF processing completed","documents":created}
+        doc=Document(filename=safe,stored_path=str(target),pdf_data=data,status="processing",progress_percent=0,current_page=0,total_pages=0,current_stage="queued",records_found=0); db.add(doc); db.commit(); db.refresh(doc)
+        background_tasks.add_task(_run_document,doc.id)
+        created.append({"id":doc.id,"filename":safe,"status":"processing","progress_percent":0,"current_page":0,"total_pages":0,"records":0})
+    return {"status":"ok","message":"PDF uploaded; OCR started in background","documents":created}
 
 @router.post("/admin/documents/{document_id}/reprocess")
-def reprocess_document(document_id:int,user=Depends(admin_user),db:Session=Depends(get_db)):
+def reprocess_document(document_id:int,background_tasks:BackgroundTasks,user=Depends(admin_user),db:Session=Depends(get_db)):
     doc=db.get(Document,document_id)
     if not doc: raise HTTPException(404,"Document not found")
-    old_status=doc.status
-    try:
-        doc.status="reprocessing"; doc.error_msg=None; db.commit()
-        records,pages,ocr=_process_into_document(doc,db)
-        return {"status":"ok","id":doc.id,"filename":doc.filename,"records":len(records),"pages":pages,"ocr_used":ocr}
-    except HTTPException: raise
-    except Exception as e:
-        db.rollback(); doc=db.get(Document,document_id); doc.status=old_status or "failed"; doc.error_msg=str(e)[:2000]; db.commit()
-        raise HTTPException(500,f"Re-OCR failed: {doc.error_msg}")
+    doc.status="reprocessing"; doc.progress_percent=0; doc.current_page=0; doc.total_pages=doc.page_count or 0; doc.current_stage="queued"; doc.records_found=0; doc.error_msg=None; db.commit()
+    background_tasks.add_task(_run_document,doc.id)
+    return {"status":"ok","id":doc.id,"filename":doc.filename,"message":"Re-OCR started","progress_percent":0}
 
 @router.delete("/admin/documents/{document_id}")
 def delete_document(document_id:int,user=Depends(admin_user),db:Session=Depends(get_db)):
     doc=db.get(Document,document_id)
     if not doc: raise HTTPException(404,"Document not found")
-    path=Path(doc.stored_path) if doc.stored_path else None
-    db.delete(doc); db.commit()
+    path=Path(doc.stored_path) if doc.stored_path else None; db.delete(doc); db.commit()
     if path and path.exists():
-        try: path.unlink()
-        except OSError: pass
+        try:path.unlink()
+        except OSError:pass
     return {"status":"ok","message":"Document and its voter records deleted","id":document_id}
 
 @router.get("/admin/documents")
 def documents(user=Depends(admin_user),db:Session=Depends(get_db)):
     docs=db.query(Document).order_by(Document.uploaded_at.desc()).limit(100).all()
-    return [{"id":d.id,"filename":d.filename,"page_count":d.page_count,"status":d.status,"ocr_used":d.ocr_used,"error_msg":d.error_msg,"uploaded_at":d.uploaded_at,"has_pdf":bool(d.pdf_data) or bool(d.stored_path and Path(d.stored_path).exists())} for d in docs]
+    return [{"id":d.id,"filename":d.filename,"page_count":d.page_count,"status":d.status,"ocr_used":d.ocr_used,"error_msg":d.error_msg,"uploaded_at":d.uploaded_at,"has_pdf":bool(d.pdf_data) or bool(d.stored_path and Path(d.stored_path).exists()),"progress_percent":getattr(d,'progress_percent',0) or 0,"current_page":getattr(d,'current_page',0) or 0,"total_pages":getattr(d,'total_pages',0) or 0,"current_stage":getattr(d,'current_stage','queued') or 'queued',"records_found":getattr(d,'records_found',0) or 0} for d in docs]
 
 @router.get("/voter-search/search")
 def search(q:str|None=None,name:str|None=None,father_name:str|None=None,mother_name:str|None=None,voter_id:str|None=None,district:str|None=None,upazila:str|None=None,union_name:str|None=None,ward:str|None=None,occupation:str|None=None,gender:str|None=None,page:int=1,page_size:int=50,db:Session=Depends(get_db),user=Depends(admin_user)):

@@ -19,13 +19,17 @@ class Document(Base):
     filename = Column(String(500), nullable=False)
     stored_path = Column(String(1000), nullable=False)
     storage_key = Column(String(1200), nullable=True, index=True)
-    # Legacy fallback for previously uploaded small PDFs. New large PDFs use object storage.
     pdf_data = Column(LargeBinary, nullable=True)
     page_count = Column(Integer, default=0)
     status = Column(String(30), default="pending", nullable=False, index=True)
     ocr_used = Column(Boolean, default=False, nullable=False)
     error_msg = Column(Text)
     uploaded_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    progress_percent = Column(Integer, default=0, nullable=False)
+    current_page = Column(Integer, default=0, nullable=False)
+    total_pages = Column(Integer, default=0, nullable=False)
+    current_stage = Column(String(100), default="queued", nullable=False)
+    records_found = Column(Integer, default=0, nullable=False)
     records = relationship("VoterRecord", back_populates="document", cascade="all, delete-orphan")
 
 class VoterRecord(Base):

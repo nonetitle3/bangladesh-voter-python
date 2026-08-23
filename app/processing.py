@@ -1,15 +1,12 @@
-import re
-import unicodedata
+import re, unicodedata
 from datetime import datetime
-import fitz
-import numpy as np
+import fitz, numpy as np
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 import pytesseract
 
 LABELS={'voter_id':[r'ভোটার\s*(?:নং|নম্বর)',r'NID',r'Voter\s*ID'],'serial_no':[r'ক্রমিক',r'সিরিয়াল',r'সিরিয়াল',r'serial'],'name':[r'নাম',r'name'],'father_name':[r'পিতা',r'পিতার\s*নাম',r'father'],'mother_name':[r'মাতা',r'মাতার\s*নাম',r'mother'],'birth_date':[r'জন্ম\s*তারিখ',r'DOB',r'date\s*of\s*birth'],'occupation':[r'পেশা',r'occupation'],'gender':[r'লিঙ্গ',r'gender'],'address':[r'ঠিকানা',r'ঠিকানা\s*ঃ?',r'address'],'village':[r'গ্রাম',r'village'],'ward':[r'ওয়ার্ড',r'ওয়ার্ড',r'ওয়র্ড',r'ward'],'union_name':[r'ইউনিয়ন',r'ইউনিয়ন',r'union'],'upazila':[r'উপজেলা',r'upazila'],'district':[r'জেলা',r'district'],'division':[r'বিভাগ',r'division'],'post_code':[r'পোস্ট\s*কোড',r'পোস্টকোড',r'post\s*code']}
-ALL_LABEL_PATTERNS=[p for ps in LABELS.values() for p in ps]
-NEXT_LABEL_RE=re.compile(r'(?:'+'|'.join(ALL_LABEL_PATTERNS)+r')\s*[:：-]?',re.I)
-BENGALI_RE=re.compile(r'[\u0980-\u09FF]'); CONSONANT=r'[\u0985-\u09B9\u09DC-\u09DF]'; VOWEL=r'[\u09BF-\u09CC]'; MOJIBAKE=('Ï','Ɓ','ė','ĥ','×','Î','Ð','Ý','�')
+ALL=[p for ps in LABELS.values() for p in ps]; NEXT=re.compile(r'(?:'+'|'.join(ALL)+r')\s*[:：-]?',re.I)
+BENGALI=re.compile(r'[\u0980-\u09FF]'); CONSONANT=r'[\u0985-\u09B9\u09DC-\u09DF]'; VOWEL=r'[\u09BF-\u09CC]'; MOJIBAKE=('Ï','Ɓ','ė','ĥ','×','Î','Ð','Ý','�')
 
 def normalize_bengali(text):
     if not text:return text
@@ -28,11 +25,11 @@ def native_text_is_good(text):
     text=text or ''
     if any(x in text for x in MOJIBAKE):return False
     compact=re.sub(r'\s+','',text)
-    return len(compact)>=80 and len(BENGALI_RE.findall(text))>=15 and sum(bool(re.search(p,text)) for p in (r'নাম',r'পিতা',r'মাতা',r'ঠিকানা',r'জেলা',r'উপজেলা'))>=2
+    return len(compact)>=80 and len(BENGALI.findall(text))>=15 and sum(bool(re.search(p,text)) for p in (r'নাম',r'পিতা',r'মাতা',r'ঠিকানা',r'জেলা',r'উপজেলা'))>=2
 
 def ocr_quality(text):
     if not text:return -1
-    compact=re.sub(r'\s+','',text); b=len(BENGALI_RE.findall(text)); bad=text.count('�'); labels=sum(bool(re.search(p,text)) for p in (r'নাম',r'পিতা',r'মাতা',r'ঠিকানা',r'জেলা',r'উপজেলা',r'ইউনিয়ন',r'ওয়ার্ড'))
+    compact=re.sub(r'\s+','',text); b=len(BENGALI.findall(text)); bad=text.count('�'); labels=sum(bool(re.search(p,text)) for p in (r'নাম',r'পিতা',r'মাতা',r'ঠিকানা',r'জেলা',r'উপজেলা',r'ইউনিয়ন',r'ওয়ার্ড'))
     return min(len(compact),500)+b*3+labels*100-bad*100
 
 def clean_field(value):
@@ -40,7 +37,7 @@ def clean_field(value):
     value=normalize_bengali(value); value=re.sub(r'\s*[:：]\s*',': ',value); value=re.sub(r'\s{2,}',' ',value); return value.strip(' -:：') or None
 
 def _cut(value):
-    m=NEXT_LABEL_RE.search(value or ''); return value[:m.start()] if m and m.start()>0 else value
+    m=NEXT.search(value or ''); return value[:m.start()] if m and m.start()>0 else value
 
 def value_after_label(lines,patterns,multiline=False):
     for i,line in enumerate(lines):
@@ -51,14 +48,14 @@ def value_after_label(lines,patterns,multiline=False):
                 if first:
                     if not multiline:return first
                     vals=[first]; j=i+1
-                    while j<len(lines) and lines[j].strip() and not NEXT_LABEL_RE.search(lines[j]):vals.append(lines[j].strip()); j+=1
+                    while j<len(lines) and lines[j].strip() and not NEXT.search(lines[j]):vals.append(lines[j].strip()); j+=1
                     return clean_field(' '.join(vals))
             if re.search(p,line,re.I) and i+1<len(lines):
                 first=clean_field(_cut(lines[i+1]))
                 if first:
                     if not multiline:return first
                     vals=[first]; j=i+2
-                    while j<len(lines) and lines[j].strip() and not NEXT_LABEL_RE.search(lines[j]):vals.append(lines[j].strip()); j+=1
+                    while j<len(lines) and lines[j].strip() and not NEXT.search(lines[j]):vals.append(lines[j].strip()); j+=1
                     return clean_field(' '.join(vals))
     return None
 
@@ -98,7 +95,7 @@ def _grid_bounds(image):
 
 def _score(key,value):
     if not value:return -1
-    s=len(BENGALI_RE.findall(str(value)))*4+min(len(str(value)),80)-len(re.findall(r'[A-Za-z]',str(value)))*3
+    s=len(BENGALI.findall(str(value)))*4+min(len(str(value)),80)-len(re.findall(r'[A-Za-z]',str(value)))*3
     if key=='voter_id':s+=len(re.findall(r'\d',str(value)))*8
     if key=='birth_date' and re.search(r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}',str(value)):s+=100
     return s
@@ -161,19 +158,26 @@ def _apply_location(record,metadata):
     for k,v in metadata.items():
         if not record.get(k):record[k]=v
     if not record.get('address'):
-        parts=[record.get(k) or metadata.get(k) for k in ('village','ward','union_name','upazila','district','division','post_code')]
-        parts=[str(x).strip() for x in parts if x and str(x).strip()]
+        parts=[record.get(k) or metadata.get(k) for k in ('village','ward','union_name','upazila','district','division','post_code')]; parts=[str(x).strip() for x in parts if x and str(x).strip()]
         if parts:record['address']=', '.join(dict.fromkeys(parts))
     return record
 
-def process_pdf(file_path):
+def process_pdf(file_path, progress_callback=None):
     results=[]; any_ocr=False
+    def progress(page, total, stage, records=0):
+        if progress_callback:
+            try: progress_callback(page,total,stage,records)
+            except Exception: pass
     with fitz.open(file_path) as doc:
-        page_count=len(doc)
-        location=_merge_location([extract_location_metadata(doc[i]) for i in range(min(2,page_count))])
-        for page_number in range(3,page_count+1):
+        total=len(doc); progress(0,total,'reading PDF',0)
+        location=_merge_location([extract_location_metadata(doc[i]) for i in range(min(2,total))])
+        progress(min(2,total),total,'reading location pages',0)
+        for page_number in range(3,total+1):
+            progress(page_number,total,'OCR page',len(results))
             page_results,ocr=extract_page(doc[page_number-1]); any_ocr|=ocr
             for record in page_results:
                 if len(re.sub(r'\s+','',record.get('raw_text') or ''))<15:continue
                 record=_apply_location(record,location); record.update(page_number=page_number,ocr_used=ocr,confidence=.86 if ocr else .95); results.append(record)
-    return results,any_ocr,page_count
+            progress(page_number,total,'saving records',len(results))
+    progress(total,total,'completed',len(results))
+    return results,any_ocr,total

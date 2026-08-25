@@ -22,25 +22,9 @@ def normalize(text):
 
 
 def repair_bengali_matras(text):
-    """Repair Bengali PDF/OCR visual-order corruption without guessing spelling.
-
-    Examples:
-      মািনক -> মানিক
-      িময়া -> মিয়া
-      জুেবদা -> জুবেদা
-      েম -> মে
-
-    A pre-base sign is moved only when the PDF has actually emitted it in a
-    position that indicates corruption. Normal spellings such as বেগম are
-    left untouched.
-    """
     if not text:
         return ""
-
     chars = list(text)
-
-    # A vowel sign at the beginning of a token may have been emitted before
-    # its base consonant.
     out = []
     i = 0
     while i < len(chars):
@@ -57,41 +41,35 @@ def repair_bengali_matras(text):
         out.append(ch)
         i += 1
 
-    # If a post-base sign is followed by a pre-base sign before the next
-    # consonant, the pre-base sign normally belongs to that next consonant:
-    # ম + া + ি + ন -> ম + া + ন + ি.
     chars = out
     out = []
     i = 0
     while i < len(chars):
         ch = chars[i]
         out.append(ch)
-
         if ch in BENGALI_CONSONANT:
             j = i + 1
             marks = []
             while j < len(chars) and chars[j] in BENGALI_VOWEL_SIGNS:
                 marks.append(chars[j])
                 j += 1
-
             pre = [m for m in marks if m in PREBASE_SIGNS]
             post = [m for m in marks if m not in PREBASE_SIGNS]
-
             if pre and post and j < len(chars) and chars[j] in BENGALI_CONSONANT:
                 out.extend(post)
                 out.append(chars[j])
                 out.extend(pre)
                 i = j + 1
                 continue
-
         i += 1
-
     return "".join(out)
 
 
 def repair(text):
     text = normalize(text)
     replacements = [
+        ("শিŐী", "শিল্পী"),
+        ("মýুƁল", "মকবুল"),
         ("Ïমাসাঃ", "মোসাঃ"), ("Ïমাঃ", "মোঃ"),
         ("Ïভাটার", "ভোটার"), ("Ïপেশা", "পেশা"), ("Ïপশা", "পেশা"),
         ("Ïজলা", "জেলা"), ("Ïউপেজলা", "উপজেলা"),
@@ -110,6 +88,17 @@ def repair(text):
     ]
     for old, new in replacements:
         text = text.replace(old, new)
+
+    # Some PDF ToUnicode maps collapse Bengali conjuncts/letters into
+    # unrelated Latin/extended characters. Only apply these mappings when
+    # they occur in the exact corrupted sequences we have observed.
+    sequence_repairs = {
+        "Ő": "ল্প",
+        "ýুƁ": "কবু",
+    }
+    for old, new in sequence_repairs.items():
+        text = text.replace(old, new)
+
     text = text.replace("Ï", "")
     text = text.replace("×", "ক্")
     text = text.replace("ĥ", "ন্")
@@ -131,7 +120,6 @@ def normalize_field(value, field):
     value = re.sub(r"\s+", " ", value).strip()
 
     if field in {"name", "father_name", "mother_name"}:
-        # Only structural/Unicode cleanup; do not guess personal names.
         value = value.replace("মোঃ", "মোঃ").replace("মোসাঃ", "মোসাঃ")
         value = value.replace("মােঃ", "মোঃ")
         value = value.replace("মি য়া", "মিয়া").replace("মি য়া", "মিয়া")

@@ -7,6 +7,7 @@ from PIL import Image, ImageEnhance, ImageOps
 import pytesseract
 
 DIGITS = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
+BENGALI_CONSONANT = r"[\u0995-\u09B9\u09DC-\u09DF\u09F0-\u09FA]"
 
 
 def normalize(text):
@@ -16,6 +17,35 @@ def normalize(text):
     text = text.replace("\r", "\n").replace("\u00a0", " ")
     text = re.sub(r"[\u200b\u200c\u200d\ufeff]", "", text)
     return re.sub(r"[ \t]+", " ", text).strip()
+
+
+def repair_bengali_matras(text):
+    """Repair Bengali vowel signs that PDF text extraction places before the
+    consonant they belong to. Examples:
+       মািনক  -> মানিক
+       িময়া  -> মিয়া
+       েম      -> মে
+    This is a Unicode ordering repair, not a spelling guess."""
+    if not text:
+        return ""
+
+    # If i-kar/ii-kar was extracted between another matra and its consonant,
+    # move it after that consonant: ম + া + ি + ন -> ম + া + ন + ি.
+    for _ in range(3):
+        text = re.sub(
+            r"([\u09BE-\u09CC])([\u09BF\u09C0])(" + BENGALI_CONSONANT + r")",
+            r"\1\3\2",
+            text,
+        )
+
+        # Pre-base vowel signs sometimes appear before the base consonant at
+        # the start of a word or after whitespace/punctuation.
+        text = re.sub(
+            r"(^|[\s(\[\{\"'।,;:/-])([\u09BF\u09C0\u09C7\u09C8])(" + BENGALI_CONSONANT + r")",
+            r"\1\3\2",
+            text,
+        )
+    return text
 
 
 def repair(text):
@@ -47,6 +77,7 @@ def repair(text):
     text = text.replace("ĥ", "ন্")
     text = text.replace("ė", "দ্দ")
     text = text.replace("Î", "র্")
+    text = repair_bengali_matras(text)
     return normalize(text)
 
 
@@ -85,8 +116,6 @@ def native_records(page):
         return []
     text = repair(raw)
 
-    # The serial may be followed by "নাম:" or the name may be on the next
-    # line. Do not require a particular line layout.
     starts = list(re.finditer(r"(?m)(?:^|\n)\s*([০-৯0-9]{3})\s*\.\s*", text))
     if not starts:
         return []
@@ -113,8 +142,6 @@ def native_records(page):
             dm = re.search(r"[০-৯0-9]{1,2}[/-][০-৯0-9]{1,2}[/-][০-৯0-9]{4}", line)
             occupation = clean(line[:dm.start()] if dm else line)
 
-        # Some copies put birth date immediately after occupation without a
-        # separate label. Handle that form too.
         if not birth_date:
             birth_date = parse_date(block)
 
@@ -157,7 +184,6 @@ def ocr_fallback(page):
     image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
     image = ImageEnhance.Contrast(ImageOps.grayscale(image)).enhance(1.4)
     text = pytesseract.image_to_string(image, lang="ben+eng", config="--psm 6")
-    # Feed OCR text through the same robust block parser.
     class OCRPage:
         def get_text(self, mode="text"):
             return text

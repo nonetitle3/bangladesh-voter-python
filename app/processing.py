@@ -7,7 +7,9 @@ from PIL import Image, ImageEnhance, ImageOps
 import pytesseract
 
 DIGITS = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
-BENGALI_CONSONANT = r"[\u0995-\u09B9\u09DC-\u09DF\u09F0-\u09FA]"
+BENGALI_CONSONANT = set("কখগঘঙচছজঝঞটঠডঢণতথদধনপফবভমযরলশষসহড়ঢ়য়ৎ")
+BENGALI_VOWEL_SIGNS = set("ািীুূৃেৈোৌ")
+PREBASE_SIGNS = set("িীেৈ")
 
 
 def normalize(text):
@@ -20,16 +22,71 @@ def normalize(text):
 
 
 def repair_bengali_matras(text):
+    """Repair Bengali PDF/OCR visual-order corruption without guessing spelling.
+
+    Examples:
+      মািনক -> মানিক
+      িময়া -> মিয়া
+      জুেবদা -> জুবেদা
+      েম -> মে
+
+    A pre-base sign is moved only when the PDF has actually emitted it in a
+    position that indicates corruption. Normal spellings such as বেগম are
+    left untouched.
+    """
     if not text:
         return ""
-    for _ in range(3):
-        text = re.sub(
-            r"([\u09BE-\u09CC])([\u09BF\u09C0])(" + BENGALI_CONSONANT + r")",
-            r"\1\3\2", text)
-        text = re.sub(
-            r"(^|[\s(\[\{\"'।,;:/-])([\u09BF\u09C0\u09C7\u09C8])(" + BENGALI_CONSONANT + r")",
-            r"\1\3\2", text)
-    return text
+
+    chars = list(text)
+
+    # A vowel sign at the beginning of a token may have been emitted before
+    # its base consonant.
+    out = []
+    i = 0
+    while i < len(chars):
+        ch = chars[i]
+        if ch in PREBASE_SIGNS and (i == 0 or chars[i - 1] in " \n\t,.;:()[]{}-/"):
+            j = i + 1
+            while j < len(chars) and chars[j] in PREBASE_SIGNS:
+                j += 1
+            if j < len(chars) and chars[j] in BENGALI_CONSONANT:
+                out.append(chars[j])
+                out.extend(chars[i:j])
+                i = j + 1
+                continue
+        out.append(ch)
+        i += 1
+
+    # If a post-base sign is followed by a pre-base sign before the next
+    # consonant, the pre-base sign normally belongs to that next consonant:
+    # ম + া + ি + ন -> ম + া + ন + ি.
+    chars = out
+    out = []
+    i = 0
+    while i < len(chars):
+        ch = chars[i]
+        out.append(ch)
+
+        if ch in BENGALI_CONSONANT:
+            j = i + 1
+            marks = []
+            while j < len(chars) and chars[j] in BENGALI_VOWEL_SIGNS:
+                marks.append(chars[j])
+                j += 1
+
+            pre = [m for m in marks if m in PREBASE_SIGNS]
+            post = [m for m in marks if m not in PREBASE_SIGNS]
+
+            if pre and post and j < len(chars) and chars[j] in BENGALI_CONSONANT:
+                out.extend(post)
+                out.append(chars[j])
+                out.extend(pre)
+                i = j + 1
+                continue
+
+        i += 1
+
+    return "".join(out)
 
 
 def repair(text):
@@ -37,7 +94,7 @@ def repair(text):
     replacements = [
         ("Ïমাসাঃ", "মোসাঃ"), ("Ïমাঃ", "মোঃ"),
         ("Ïভাটার", "ভোটার"), ("Ïপেশা", "পেশা"), ("Ïপশা", "পেশা"),
-        ("Ïজলা", "জেলা"), ("Ïউপেজলা", "উপজেলা"), ("Ïউপেজলা", "উপজেলা"),
+        ("Ïজলা", "জেলা"), ("Ïউপেজলা", "উপজেলা"),
         ("Ïঘাগা", "ঘোগা"), ("Ïভাটার এলাকার নাম", "ভোটার এলাকার নাম"),
         ("Ïভাটার এলাকার Ïকাড", "ভোটার এলাকার কোড"),
         ("ÏপাŞেকাড", "পোস্টকোড"), ("Ïডাকঘর", "ডাকঘর"),
@@ -61,60 +118,47 @@ def repair(text):
     return normalize(repair_bengali_matras(text))
 
 
-# Field-specific normalization. These rules only repair character/format
-# corruption. They deliberately do NOT invent a person's spelling from a
-# dictionary, because a unique Bengali name must be preserved exactly.
+def clean(value):
+    value = repair(value)
+    return value.strip(" :-：,।\n") or None
+
+
 def normalize_field(value, field):
     value = clean(value)
     if not value:
         return None
-    value = normalize(repair_bengali_matras(value))
+    value = repair_bengali_matras(value)
+    value = re.sub(r"\s+", " ", value).strip()
 
     if field in {"name", "father_name", "mother_name"}:
-        value = re.sub(r"\s+", " ", value)
-        value = value.replace("মিঃ", "মিঃ").replace("মোঃ", "মোঃ")
-        value = value.replace("মোসাঃ", "মোসাঃ")
+        # Only structural/Unicode cleanup; do not guess personal names.
+        value = value.replace("মোঃ", "মোঃ").replace("মোসাঃ", "মোসাঃ")
         value = value.replace("মােঃ", "মোঃ")
-        # OCR/PDF extraction often separates the y-phala sequence.
         value = value.replace("মি য়া", "মিয়া").replace("মি য়া", "মিয়া")
         value = re.sub(r"\s+([ািীুূৃেৈোৌ্য়ঁংঃ])", r"\1", value)
 
     elif field == "address":
         value = re.sub(r"\s*,\s*", ", ", value)
-        value = re.sub(r"\s+", " ", value)
         value = value.replace("ইউনিয়ন", "ইউনিয়ন")
         value = value.replace("ওয়ার্ড", "ওয়ার্ড")
-        value = value.replace("গ্রামঃ", "গ্রাম:").replace("গ্রাম-", "গ্রাম-")
+        value = value.replace("গ্রামঃ", "গ্রাম:")
 
     elif field == "occupation":
-        value = re.sub(r"\s+", " ", value)
-        occupation_map = {
-            "বËবসা": "ব্যবসা", "Řিমক": "শ্রমিক", "গৃহীণী": "গৃহিণী",
-            "গৃহিনী": "গৃহিণী", "ছাÛ": "ছাত্র", "ছাÊ": "ছাত্র",
-        }
-        for old, new in occupation_map.items():
-            value = value.replace(old, new)
+        value = value.replace("বËবসা", "ব্যবসা").replace("Řিমক", "শ্রমিক")
+        value = value.replace("গৃহীণী", "গৃহিণী").replace("গৃহিনী", "গৃহিণী")
+        value = value.replace("ছাÛ", "ছাত্র").replace("ছাÊ", "ছাত্র")
 
     elif field in {"district", "upazila", "union_name"}:
-        value = re.sub(r"\s+", " ", value)
-        location_map = {
-            "ময়মনিসংহ": "ময়মনসিংহ", "ময়মনসিংহ": "ময়মনসিংহ",
-            "মু×াগাছা": "মুক্তাগাছা", "মু্ক্তাগাছা": "মুক্তাগাছা",
-            "পারুলীতলা": "পারুলীতলা", "পাƁলীতলা": "পারুলীতলা",
-        }
-        for old, new in location_map.items():
-            value = value.replace(old, new)
+        value = value.replace("ময়মনিসংহ", "ময়মনসিংহ")
+        value = value.replace("মু×াগাছা", "মুক্তাগাছা")
+        value = value.replace("মু্ক্তাগাছা", "মুক্তাগাছা")
+        value = value.replace("পাƁলীতলা", "পারুলীতলা")
 
     elif field == "voter_id":
         value = value.translate(DIGITS)
         value = re.sub(r"[^0-9]", "", value)
 
     return normalize(value)
-
-
-def clean(value):
-    value = repair(value)
-    return value.strip(" :-：,।\n") or None
 
 
 def parse_date(value):
@@ -132,8 +176,11 @@ def parse_date(value):
 
 def _field(block, labels, stop_labels, field_name):
     label = "(?:" + "|".join(labels) + ")"
-    stop = "|".join(stop_labels)
-    pattern = rf"{label}\s*[:：]?\s*(.+?)(?=\s*(?:{stop})\s*[:：]|$)" if stop else rf"{label}\s*[:：]?\s*(.+)$"
+    if stop_labels:
+        stop = "|".join(stop_labels)
+        pattern = rf"{label}\s*[:：]?\s*(.+?)(?=\s*(?:{stop})\s*[:：]|$)"
+    else:
+        pattern = rf"{label}\s*[:：]?\s*(.+)$"
     m = re.search(pattern, block, flags=re.I | re.S)
     return normalize_field(m.group(1), field_name) if m else None
 
@@ -143,6 +190,7 @@ def native_records(page):
     if not raw:
         return []
     text = repair(raw)
+
     starts = list(re.finditer(r"(?m)(?:^|\n)\s*([০-৯0-9]{3})\s*\.\s*", text))
     if not starts:
         return []
@@ -152,9 +200,8 @@ def native_records(page):
         end = starts[i + 1].start() if i + 1 < len(starts) else len(text)
         block = text[match.end():end].strip()
         serial = match.group(1)
-        stop = ["নাম", "ভোটার(?:\s*নং)?", "পিতা", "মাতা", "পেশা", "জন্ম(?:\s*তারিখ)?", "ঠিকানা"]
 
-        name = _field(block, ["নাম"], stop[1:], "name")
+        name = _field(block, ["নাম"], ["ভোটার(?:\s*নং)?", "পিতা", "মাতা", "পেশা", "জন্ম(?:\s*তারিখ)?", "ঠিকানা"], "name")
         voter_id = _field(block, [r"ভোটার\s*নং", r"ভোটার\s*নম্বর", "NID", r"Voter\s*ID"], ["পিতা", "মাতা", "পেশা", "জন্ম(?:\s*তারিখ)?", "ঠিকানা"], "voter_id")
         father = _field(block, ["পিতা", r"পিতার\s*নাম"], ["মাতা", "পেশা", "জন্ম(?:\s*তারিখ)?", "ঠিকানা"], "father_name")
         mother = _field(block, ["মাতা", r"মাতার\s*নাম"], ["পেশা", "জন্ম(?:\s*তারিখ)?", "ঠিকানা"], "mother_name")
@@ -168,6 +215,7 @@ def native_records(page):
             birth_date = parse_date(line)
             dm = re.search(r"[০-৯0-9]{1,2}[/-][০-৯0-9]{1,2}[/-][০-৯0-9]{4}", line)
             occupation = normalize_field(line[:dm.start()] if dm else line, "occupation")
+
         if not birth_date:
             birth_date = parse_date(block)
 
@@ -184,6 +232,7 @@ def native_records(page):
         }
         if any(rec[k] for k in ("name", "voter_id", "father_name", "mother_name", "address")):
             records.append(rec)
+
     return records
 
 
@@ -201,7 +250,7 @@ def location_metadata(doc):
     for field, pattern in patterns.items():
         m = re.search(pattern, text, flags=re.I | re.S)
         if m:
-            result[field] = normalize_field(m.group(1), field) if field != "post_code" and field != "ward" else clean(m.group(1))
+            result[field] = normalize_field(m.group(1), field) if field not in {"post_code", "ward"} else clean(m.group(1))
     return result
 
 
@@ -210,9 +259,11 @@ def ocr_fallback(page):
     image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
     image = ImageEnhance.Contrast(ImageOps.grayscale(image)).enhance(1.4)
     text = pytesseract.image_to_string(image, lang="ben+eng", config="--psm 6")
+
     class OCRPage:
         def get_text(self, mode="text"):
             return text
+
     return native_records(OCRPage())
 
 
@@ -231,6 +282,7 @@ def process_pdf(file_path, progress_callback=None):
         total = len(doc)
         location = location_metadata(doc)
         progress(min(2, total), total, "reading location pages", 0)
+
         for page_number in range(3, total + 1):
             progress(page_number, total, "extracting voter records", len(results))
             page = doc[page_number - 1]
@@ -238,16 +290,20 @@ def process_pdf(file_path, progress_callback=None):
             if not page_records:
                 page_records = ocr_fallback(page)
                 any_ocr = True
+
             for record in page_records:
                 for field in ("district", "upazila", "union_name", "ward", "post_code"):
                     if not record.get(field) and location.get(field):
                         record[field] = location[field]
                 if not record.get("address") and location.get("address"):
                     record["address"] = location["address"]
+
                 record["page_number"] = page_number
                 record["ocr_used"] = any_ocr
                 record["confidence"] = 0.98 if not any_ocr else 0.75
                 results.append(record)
+
             progress(page_number, total, "saving records", len(results))
+
     progress(total, total, "completed", len(results))
     return results, any_ocr, total

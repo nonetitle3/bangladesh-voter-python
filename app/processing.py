@@ -72,6 +72,12 @@ def has_suspicious_encoding(text):
     return any(ch in SUSPICIOUS_CHARS for ch in text)
 
 
+def suspicious_count(text):
+    if not text:
+        return 0
+    return sum(ch in SUSPICIOUS_CHARS for ch in text)
+
+
 def repair(text):
     text = normalize(text)
     replacements = [
@@ -96,18 +102,12 @@ def repair(text):
     for old, new in replacements:
         text = text.replace(old, new)
 
-    sequence_repairs = {
-        "Ő": "ল্প",
-        "ýুƁ": "কবু",
-    }
+    sequence_repairs = {"Ő": "ল্প", "ýুƁ": "কবু"}
     for old, new in sequence_repairs.items():
         text = text.replace(old, new)
 
-    text = text.replace("Ï", "")
-    text = text.replace("×", "ক্")
-    text = text.replace("ĥ", "ন্")
-    text = text.replace("ė", "দ্দ")
-    text = text.replace("Î", "র্")
+    text = text.replace("Ï", "").replace("×", "ক্")
+    text = text.replace("ĥ", "ন্").replace("ė", "দ্দ").replace("Î", "র্")
     return normalize(repair_bengali_matras(text))
 
 
@@ -122,34 +122,25 @@ def normalize_field(value, field):
         return None
     value = repair_bengali_matras(value)
     value = re.sub(r"\s+", " ", value).strip()
-
     if field in {"name", "father_name", "mother_name"}:
         value = value.replace("মোঃ", "মোঃ").replace("মোসাঃ", "মোসাঃ")
         value = value.replace("মােঃ", "মোঃ")
         value = value.replace("মি য়া", "মিয়া").replace("মি য়া", "মিয়া")
         value = re.sub(r"\s+([ািীুূৃেৈোৌ্য়ঁংঃ])", r"\1", value)
-
     elif field == "address":
         value = re.sub(r"\s*,\s*", ", ", value)
-        value = value.replace("ইউনিয়ন", "ইউনিয়ন")
-        value = value.replace("ওয়ার্ড", "ওয়ার্ড")
+        value = value.replace("ইউনিয়ন", "ইউনিয়ন").replace("ওয়ার্ড", "ওয়ার্ড")
         value = value.replace("গ্রামঃ", "গ্রাম:")
-
     elif field == "occupation":
         value = value.replace("বËবসা", "ব্যবসা").replace("Řিমক", "শ্রমিক")
         value = value.replace("গৃহীণী", "গৃহিণী").replace("গৃহিনী", "গৃহিণী")
         value = value.replace("ছাÛ", "ছাত্র").replace("ছাÊ", "ছাত্র")
-
     elif field in {"district", "upazila", "union_name"}:
-        value = value.replace("ময়মনিসংহ", "ময়মনসিংহ")
-        value = value.replace("মু×াগাছা", "মুক্তাগাছা")
-        value = value.replace("মু্ক্তাগাছা", "মুক্তাগাছা")
-        value = value.replace("পাƁলীতলা", "পারুলীতলা")
-
+        value = value.replace("ময়মনিসংহ", "ময়মনসিংহ").replace("মু×াগাছা", "মুক্তাগাছা")
+        value = value.replace("মু্ক্তাগাছা", "মুক্তাগাছা").replace("পাƁলীতলা", "পারুলীতলা")
     elif field == "voter_id":
         value = value.translate(DIGITS)
         value = re.sub(r"[^0-9]", "", value)
-
     return normalize(value)
 
 
@@ -182,23 +173,19 @@ def native_records(page):
     if not raw:
         return []
     text = repair(raw)
-
     starts = list(re.finditer(r"(?m)(?:^|\n)\s*([০-৯0-9]{3})\s*\.\s*", text))
     if not starts:
         return []
-
     records = []
     for i, match in enumerate(starts):
         end = starts[i + 1].start() if i + 1 < len(starts) else len(text)
         block = text[match.end():end].strip()
         serial = match.group(1)
-
         name = _field(block, ["নাম"], ["ভোটার(?:\s*নং)?", "পিতা", "মাতা", "পেশা", "জন্ম(?:\s*তারিখ)?", "ঠিকানা"], "name")
         voter_id = _field(block, [r"ভোটার\s*নং", r"ভোটার\s*নম্বর", "NID", r"Voter\s*ID"], ["পিতা", "মাতা", "পেশা", "জন্ম(?:\s*তারিখ)?", "ঠিকানা"], "voter_id")
         father = _field(block, ["পিতা", r"পিতার\s*নাম"], ["মাতা", "পেশা", "জন্ম(?:\s*তারিখ)?", "ঠিকানা"], "father_name")
         mother = _field(block, ["মাতা", r"মাতার\s*নাম"], ["পেশা", "জন্ম(?:\s*তারিখ)?", "ঠিকানা"], "mother_name")
         address = _field(block, ["ঠিকানা"], [], "address")
-
         occupation = None
         birth_date = None
         occ = re.search(r"পেশা\s*[:：]?\s*(.+?)(?=\s*(?:জন্ম\s*তারিখ|ঠিকানা)\s*[:：]|$)", block, flags=re.I | re.S)
@@ -207,24 +194,11 @@ def native_records(page):
             birth_date = parse_date(line)
             dm = re.search(r"[০-৯0-9]{1,2}[/-][০-৯0-9]{1,2}[/-][০-৯0-9]{4}", line)
             occupation = normalize_field(line[:dm.start()] if dm else line, "occupation")
-
         if not birth_date:
             birth_date = parse_date(block)
-
-        rec = {
-            "serial_no": serial,
-            "name": name,
-            "voter_id": voter_id,
-            "father_name": father,
-            "mother_name": mother,
-            "occupation": occupation,
-            "birth_date": birth_date,
-            "address": address,
-            "raw_text": block,
-        }
+        rec = {"serial_no": serial, "name": name, "voter_id": voter_id, "father_name": father, "mother_name": mother, "occupation": occupation, "birth_date": birth_date, "address": address, "raw_text": block}
         if any(rec[k] for k in ("name", "voter_id", "father_name", "mother_name", "address")):
             records.append(rec)
-
     return records
 
 
@@ -247,70 +221,70 @@ def location_metadata(doc):
 
 
 def ocr_fallback(page):
-    pix = page.get_pixmap(matrix=fitz.Matrix(3, 3), alpha=False)
+    # 2x rendering is substantially faster than 3x and is sufficient for
+    # normal voter-list scans. OCR is now only called for genuinely bad pages.
+    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
     image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-    image = ImageEnhance.Contrast(ImageOps.grayscale(image)).enhance(1.4)
+    image = ImageEnhance.Contrast(ImageOps.grayscale(image)).enhance(1.25)
     text = pytesseract.image_to_string(image, lang="ben+eng", config="--psm 6")
-
     class OCRPage:
         def get_text(self, mode="text"):
             return text
-
     return native_records(OCRPage())
 
 
-def records_have_encoding_corruption(records):
+def records_have_severe_encoding_corruption(records):
+    if not records:
+        return True
+    # Do not OCR a whole page because of one repaired/odd glyph. OCR only when
+    # several important fields still contain unresolved encoding characters.
+    bad_fields = 0
+    total_fields = 0
     for record in records:
-        for field in ("name", "father_name", "mother_name", "address", "occupation", "district", "upazila", "union_name"):
-            if has_suspicious_encoding(record.get(field)):
-                return True
-    return False
+        for field in ("name", "father_name", "mother_name", "address", "occupation"):
+            value = record.get(field) or ""
+            total_fields += 1
+            if suspicious_count(value) >= 2:
+                bad_fields += 1
+    if total_fields == 0:
+        return True
+    return bad_fields >= 2 and bad_fields / total_fields >= 0.20
 
 
 def process_pdf(file_path, progress_callback=None):
     results = []
     any_ocr = False
-
     def progress(page, total, stage, records):
         if progress_callback:
             try:
                 progress_callback(page, total, stage, records)
             except Exception:
                 pass
-
     with fitz.open(file_path) as doc:
         total = len(doc)
         location = location_metadata(doc)
         progress(min(2, total), total, "reading location pages", 0)
-
         for page_number in range(3, total + 1):
             progress(page_number, total, "extracting voter records", len(results))
             page = doc[page_number - 1]
             page_records = native_records(page)
-
-            # A PDF can contain selectable text but still have a broken
-            # ToUnicode map. In that case native extraction is worse than
-            # reading the visible Bengali glyphs. Re-OCR the page instead of
-            # trying to maintain an ever-growing character dictionary.
-            if not page_records or records_have_encoding_corruption(page_records):
+            # Fast path: use the PDF text layer whenever it produced records.
+            # Full image OCR is reserved for empty/severely corrupted pages.
+            if not page_records or records_have_severe_encoding_corruption(page_records):
                 ocr_records = ocr_fallback(page)
                 if ocr_records:
                     page_records = ocr_records
                 any_ocr = True
-
             for record in page_records:
                 for field in ("district", "upazila", "union_name", "ward", "post_code"):
                     if not record.get(field) and location.get(field):
                         record[field] = location[field]
                 if not record.get("address") and location.get("address"):
                     record["address"] = location["address"]
-
                 record["page_number"] = page_number
                 record["ocr_used"] = any_ocr
                 record["confidence"] = 0.98 if not any_ocr else 0.75
                 results.append(record)
-
             progress(page_number, total, "saving records", len(results))
-
     progress(total, total, "completed", len(results))
     return results, any_ocr, total

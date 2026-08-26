@@ -158,14 +158,31 @@ def native_records(page):
     if not raw:
         return []
     text = repair(raw)
-    starts = list(re.finditer(r"(?m)(?:^|\n)\s*([০-৯0-9]{3})\s*\.\s*", text))
+
+    # IMPORTANT: OCR output from the voter-list is often a multi-column/flowing
+    # text stream. A voter record marker can occur in the middle of a line, e.g.
+    # "২৩৩. নাম: মোঃ সাইদুল ইসলাম". The previous parser only accepted markers
+    # at the beginning of a line, causing several voters to be merged into one
+    # database record. Split on every serial + "নাম:" marker instead.
+    marker = re.compile(
+        r"(?<![০-৯0-9])([০-৯0-9]{1,3})\s*\.\s*(?:নাম|নামঃ|নাম:)\s*[:：]?",
+        flags=re.UNICODE,
+    )
+    starts = list(marker.finditer(text))
+
+    # Some PDFs have a first record whose marker is simply "001." or "1.".
+    if not starts:
+        starts = list(re.finditer(r"(?<![০-৯0-9])([০-৯0-9]{1,3})\s*\.\s*", text))
+
     if not starts:
         return []
+
     records = []
     for i, match in enumerate(starts):
         end = starts[i + 1].start() if i + 1 < len(starts) else len(text)
         block = text[match.end():end].strip()
-        serial = match.group(1)
+        serial = match.group(1).translate(DIGITS)
+
         name = _field(block, ["নাম"], ["ভোটার(?:\s*নং)?", "পিতা", "মাতা", "পেশা", "জন্ম(?:\s*তারিখ)?", "ঠিকানা"], "name")
         voter_id = _field(block, [r"ভোটার\s*নং", r"ভোটার\s*নম্বর", "NID", r"Voter\s*ID"], ["পিতা", "মাতা", "পেশা", "জন্ম(?:\s*তারিখ)?", "ঠিকানা"], "voter_id")
         father = _field(block, ["পিতা", r"পিতার\s*নাম"], ["মাতা", "পেশা", "জন্ম(?:\s*তারিখ)?", "ঠিকানা"], "father_name")
@@ -181,7 +198,18 @@ def native_records(page):
             occupation = normalize_field(line[:dm.start()] if dm else line, "occupation")
         if not birth_date:
             birth_date = parse_date(block)
-        rec = {"serial_no": serial, "name": name, "voter_id": voter_id, "father_name": father, "mother_name": mother, "occupation": occupation, "birth_date": birth_date, "address": address, "raw_text": block}
+
+        rec = {
+            "serial_no": serial,
+            "name": name,
+            "voter_id": voter_id,
+            "father_name": father,
+            "mother_name": mother,
+            "occupation": occupation,
+            "birth_date": birth_date,
+            "address": address,
+            "raw_text": block,
+        }
         if any(rec[k] for k in ("name", "voter_id", "father_name", "mother_name", "address")):
             records.append(rec)
     return records

@@ -30,7 +30,7 @@ def repair_bengali_matras(text):
     i = 0
     while i < len(chars):
         ch = chars[i]
-        if ch in PREBASE_SIGNS and (i == 0 or chars[i - 1] in " \n\t,.;:()[]{}-/"):
+        if ch in PREBASE_SIGNS and (i == 0 or chars[i - 1] in " \n\t,.;:()[]{}-/\\"):
             j = i + 1
             while j < len(chars) and chars[j] in PREBASE_SIGNS:
                 j += 1
@@ -41,7 +41,6 @@ def repair_bengali_matras(text):
                 continue
         out.append(ch)
         i += 1
-
     chars = out
     out = []
     i = 0
@@ -67,26 +66,17 @@ def repair_bengali_matras(text):
 
 
 def has_suspicious_encoding(text):
-    if not text:
-        return False
-    return any(ch in SUSPICIOUS_CHARS for ch in text)
-
-
-def suspicious_count(text):
-    if not text:
-        return 0
-    return sum(ch in SUSPICIOUS_CHARS for ch in text)
+    return bool(text) and any(ch in SUSPICIOUS_CHARS for ch in text)
 
 
 def repair(text):
     text = normalize(text)
     replacements = [
-        ("শিŐী", "শিল্পী"),
-        ("মýুƁল", "মকবুল"),
+        ("শিŐী", "শিল্পী"), ("মýুƁল", "মকবুল"),
         ("Ïমাসাঃ", "মোসাঃ"), ("Ïমাঃ", "মোঃ"),
         ("Ïভাটার", "ভোটার"), ("Ïপেশা", "পেশা"), ("Ïপশা", "পেশা"),
-        ("Ïজলা", "জেলা"), ("Ïউপেজলা", "উপজেলা"),
-        ("Ïঘাগা", "ঘোগা"), ("Ïভাটার এলাকার নাম", "ভোটার এলাকার নাম"),
+        ("Ïজলা", "জেলা"), ("Ïউপেজলা", "উপজেলা"), ("Ïঘাগা", "ঘোগা"),
+        ("Ïভাটার এলাকার নাম", "ভোটার এলাকার নাম"),
         ("Ïভাটার এলাকার Ïকাড", "ভোটার এলাকার কোড"),
         ("ÏপাŞেকাড", "পোস্টকোড"), ("Ïডাকঘর", "ডাকঘর"),
         ("িপতা", "পিতা"), ("িঠকানা", "ঠিকানা"),
@@ -101,11 +91,8 @@ def repair(text):
     ]
     for old, new in replacements:
         text = text.replace(old, new)
-
-    sequence_repairs = {"Ő": "ল্প", "ýুƁ": "কবু"}
-    for old, new in sequence_repairs.items():
+    for old, new in {"Ő": "ল্প", "ýুƁ": "কবু"}.items():
         text = text.replace(old, new)
-
     text = text.replace("Ï", "").replace("×", "ক্")
     text = text.replace("ĥ", "ন্").replace("ė", "দ্দ").replace("Î", "র্")
     return normalize(repair_bengali_matras(text))
@@ -123,14 +110,12 @@ def normalize_field(value, field):
     value = repair_bengali_matras(value)
     value = re.sub(r"\s+", " ", value).strip()
     if field in {"name", "father_name", "mother_name"}:
-        value = value.replace("মোঃ", "মোঃ").replace("মোসাঃ", "মোসাঃ")
-        value = value.replace("মােঃ", "মোঃ")
+        value = value.replace("মোঃ", "মোঃ").replace("মোসাঃ", "মোসাঃ").replace("মােঃ", "মোঃ")
         value = value.replace("মি য়া", "মিয়া").replace("মি য়া", "মিয়া")
         value = re.sub(r"\s+([ািীুূৃেৈোৌ্য়ঁংঃ])", r"\1", value)
     elif field == "address":
         value = re.sub(r"\s*,\s*", ", ", value)
-        value = value.replace("ইউনিয়ন", "ইউনিয়ন").replace("ওয়ার্ড", "ওয়ার্ড")
-        value = value.replace("গ্রামঃ", "গ্রাম:")
+        value = value.replace("ইউনিয়ন", "ইউনিয়ন").replace("ওয়ার্ড", "ওয়ার্ড").replace("গ্রামঃ", "গ্রাম:")
     elif field == "occupation":
         value = value.replace("বËবসা", "ব্যবসা").replace("Řিমক", "শ্রমিক")
         value = value.replace("গৃহীণী", "গৃহিণী").replace("গৃহিনী", "গৃহিণী")
@@ -220,61 +205,69 @@ def location_metadata(doc):
     return result
 
 
+def has_embedded_bangla_font(doc):
+    for page_index in range(min(3, len(doc))):
+        for font in doc[page_index].get_fonts(full=True):
+            base_name = str(font[3] or "")
+            encoding = str(font[5] or "")
+            if "bangla" in base_name.lower() or "identity-h" in encoding.lower():
+                return True
+    return False
+
+
 def ocr_fallback(page):
-    # 2x rendering is substantially faster than 3x and is sufficient for
-    # normal voter-list scans. OCR is now only called for genuinely bad pages.
-    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+    pix = page.get_pixmap(dpi=160, alpha=False)
     image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
     image = ImageEnhance.Contrast(ImageOps.grayscale(image)).enhance(1.25)
     text = pytesseract.image_to_string(image, lang="ben+eng", config="--psm 6")
+
     class OCRPage:
         def get_text(self, mode="text"):
             return text
+
     return native_records(OCRPage())
 
 
-def records_have_severe_encoding_corruption(records):
-    if not records:
-        return True
-    # Do not OCR a whole page because of one repaired/odd glyph. OCR only when
-    # several important fields still contain unresolved encoding characters.
-    bad_fields = 0
-    total_fields = 0
+def records_have_encoding_corruption(records):
     for record in records:
         for field in ("name", "father_name", "mother_name", "address", "occupation"):
-            value = record.get(field) or ""
-            total_fields += 1
-            if suspicious_count(value) >= 2:
-                bad_fields += 1
-    if total_fields == 0:
-        return True
-    return bad_fields >= 2 and bad_fields / total_fields >= 0.20
+            if has_suspicious_encoding(record.get(field)):
+                return True
+    return False
 
 
 def process_pdf(file_path, progress_callback=None):
     results = []
     any_ocr = False
+
     def progress(page, total, stage, records):
         if progress_callback:
             try:
                 progress_callback(page, total, stage, records)
             except Exception:
                 pass
+
     with fitz.open(file_path) as doc:
         total = len(doc)
         location = location_metadata(doc)
+        visual_font_pdf = has_embedded_bangla_font(doc)
         progress(min(2, total), total, "reading location pages", 0)
+
         for page_number in range(3, total + 1):
             progress(page_number, total, "extracting voter records", len(results))
             page = doc[page_number - 1]
             page_records = native_records(page)
-            # Fast path: use the PDF text layer whenever it produced records.
-            # Full image OCR is reserved for empty/severely corrupted pages.
-            if not page_records or records_have_severe_encoding_corruption(page_records):
+            if visual_font_pdf:
                 ocr_records = ocr_fallback(page)
                 if ocr_records:
                     page_records = ocr_records
                 any_ocr = True
+            elif not page_records or records_have_encoding_corruption(page_records):
+                ocr_records = ocr_fallback(page)
+                if ocr_records:
+                    page_records = ocr_records
+                any_ocr = True
+
             for record in page_records:
                 for field in ("district", "upazila", "union_name", "ward", "post_code"):
                     if not record.get(field) and location.get(field):
@@ -283,8 +276,9 @@ def process_pdf(file_path, progress_callback=None):
                     record["address"] = location["address"]
                 record["page_number"] = page_number
                 record["ocr_used"] = any_ocr
-                record["confidence"] = 0.98 if not any_ocr else 0.75
+                record["confidence"] = 0.90 if visual_font_pdf else (0.98 if not any_ocr else 0.75)
                 results.append(record)
             progress(page_number, total, "saving records", len(results))
+
     progress(total, total, "completed", len(results))
     return results, any_ocr, total

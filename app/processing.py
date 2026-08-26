@@ -117,15 +117,17 @@ def normalize_field(value, field):
         value = re.sub(r"\s*,\s*", ", ", value)
         value = value.replace("ইউনিয়ন", "ইউনিয়ন").replace("ওয়ার্ড", "ওয়ার্ড").replace("গ্রামঃ", "গ্রাম:")
     elif field == "occupation":
-        value = value.replace("বËবসা", "ব্যবসা").replace("Řিমক", "শ্রমিক")
         value = value.replace("গৃহীণী", "গৃহিণী").replace("গৃহিনী", "গৃহিণী")
         value = value.replace("ছাÛ", "ছাত্র").replace("ছাÊ", "ছাত্র")
     elif field in {"district", "upazila", "union_name"}:
         value = value.replace("ময়মনিসংহ", "ময়মনসিংহ").replace("মু×াগাছা", "মুক্তাগাছা")
         value = value.replace("মু্ক্তাগাছা", "মুক্তাগাছা").replace("পাƁলীতলা", "পারুলীতলা")
+        value = value.replace("ইউনিয়ন", "ইউনিয়ন")
     elif field == "voter_id":
         value = value.translate(DIGITS)
         value = re.sub(r"[^0-9]", "", value)
+    elif field in {"ward", "post_code"}:
+        value = value.translate(DIGITS)
     return normalize(value)
 
 
@@ -144,9 +146,9 @@ def parse_date(value):
 
 def _field(block, labels, stop_labels, field_name):
     label = "(?:" + "|".join(labels) + ")"
-    if stop_labels:
-        stop = "|".join(stop_labels)
-        pattern = rf"{label}\s*[:：]?\s*(.+?)(?=\s*(?:{stop})\s*[:：]|$)"
+    stop = "|".join(stop_labels)
+    if stop:
+        pattern = rf"{label}\s*[:：]?\s*(.+?)(?=\s*(?:{stop})\s*[:：]?|$)"
     else:
         pattern = rf"{label}\s*[:：]?\s*(.+)$"
     m = re.search(pattern, block, flags=re.I | re.S)
@@ -159,21 +161,15 @@ def native_records(page):
         return []
     text = repair(raw)
 
-    # IMPORTANT: OCR output from the voter-list is often a multi-column/flowing
-    # text stream. A voter record marker can occur in the middle of a line, e.g.
-    # "২৩৩. নাম: মোঃ সাইদুল ইসলাম". The previous parser only accepted markers
-    # at the beginning of a line, causing several voters to be merged into one
-    # database record. Split on every serial + "নাম:" marker instead.
+    # Consume only the serial number. Do NOT consume "নাম:" here; otherwise
+    # the name parser can never see its label. This fixes the old missing-name bug.
     marker = re.compile(
-        r"(?<![০-৯0-9])([০-৯0-9]{1,3})\s*\.\s*(?:নাম|নামঃ|নাম:)\s*[:：]?",
+        r"(?<![০-৯0-9])([০-৯0-9]{1,4})\s*\.\s*(?=(?:নাম|নামঃ|নাম:)\s*[:：]?)",
         flags=re.UNICODE,
     )
     starts = list(marker.finditer(text))
-
-    # Some PDFs have a first record whose marker is simply "001." or "1.".
     if not starts:
-        starts = list(re.finditer(r"(?<![০-৯0-9])([০-৯0-9]{1,3})\s*\.\s*", text))
-
+        starts = list(re.finditer(r"(?<![০-৯0-9])([০-৯0-9]{1,4})\s*\.\s*", text))
     if not starts:
         return []
 
@@ -183,21 +179,19 @@ def native_records(page):
         block = text[match.end():end].strip()
         serial = match.group(1).translate(DIGITS)
 
-        name = _field(block, ["নাম"], ["ভোটার(?:\s*নং)?", "পিতা", "মাতা", "পেশা", "জন্ম(?:\s*তারিখ)?", "ঠিকানা"], "name")
+        name = _field(block, ["নাম"], ["ভোটার(?:\s*নং)?", "ভোটার\s*নম্বর", "NID", "Voter\s*ID", "পিতা", "মাতা", "পেশা", "জন্ম(?:\s*তারিখ)?", "ঠিকানা"], "name")
         voter_id = _field(block, [r"ভোটার\s*নং", r"ভোটার\s*নম্বর", "NID", r"Voter\s*ID"], ["পিতা", "মাতা", "পেশা", "জন্ম(?:\s*তারিখ)?", "ঠিকানা"], "voter_id")
         father = _field(block, ["পিতা", r"পিতার\s*নাম"], ["মাতা", "পেশা", "জন্ম(?:\s*তারিখ)?", "ঠিকানা"], "father_name")
         mother = _field(block, ["মাতা", r"মাতার\s*নাম"], ["পেশা", "জন্ম(?:\s*তারিখ)?", "ঠিকানা"], "mother_name")
         address = _field(block, ["ঠিকানা"], [], "address")
-        occupation = None
-        birth_date = None
-        occ = re.search(r"পেশা\s*[:：]?\s*(.+?)(?=\s*(?:জন্ম\s*তারিখ|ঠিকানা)\s*[:：]|$)", block, flags=re.I | re.S)
-        if occ:
-            line = normalize_field(occ.group(1), "occupation") or ""
-            birth_date = parse_date(line)
-            dm = re.search(r"[০-৯0-9]{1,2}[/-][০-৯0-9]{1,2}[/-][০-৯0-9]{4}", line)
-            occupation = normalize_field(line[:dm.start()] if dm else line, "occupation")
-        if not birth_date:
-            birth_date = parse_date(block)
+        village = _field(block, ["গ্রাম", "গ্রাম/মহল্লা", "গ্রাম/মহল্লার নাম"], ["ওয়ার্ড", "ওয়ার্ড", "ইউনিয়ন", "ইউনিয়ন", "উপজেলা", "জেলা"], "village")
+        ward = _field(block, [r"ওয়ার্ড", r"ওয়ার্ড"], ["ইউনিয়ন", "ইউনিয়ন", "উপজেলা", "জেলা", "ঠিকানা"], "ward")
+        union_name = _field(block, ["ইউনিয়ন", "ইউনিয়ন"], ["উপজেলা", "জেলা", "ঠিকানা"], "union_name")
+        upazila = _field(block, ["উপজেলা"], ["জেলা", "ঠিকানা"], "upazila")
+        district = _field(block, ["জেলা"], ["ঠিকানা"], "district")
+        occupation = _field(block, ["পেশা"], ["জন্ম(?:\s*তারিখ)?", "ঠিকানা"], "occupation")
+        birth_date = parse_date(block)
+        gender = _field(block, ["লিঙ্গ", "লিঙ্গঃ"], ["পেশা", "জন্ম(?:\s*তারিখ)?", "ঠিকানা"], "gender")
 
         rec = {
             "serial_no": serial,
@@ -205,9 +199,15 @@ def native_records(page):
             "voter_id": voter_id,
             "father_name": father,
             "mother_name": mother,
-            "occupation": occupation,
             "birth_date": birth_date,
+            "gender": gender,
+            "occupation": occupation,
             "address": address,
+            "village": village,
+            "ward": ward,
+            "union_name": union_name,
+            "upazila": upazila,
+            "district": district,
             "raw_text": block,
         }
         if any(rec[k] for k in ("name", "voter_id", "father_name", "mother_name", "address")):
@@ -220,16 +220,16 @@ def location_metadata(doc):
     result = {}
     patterns = {
         "district": r"জেলা\s*[:：]?\s*(.+?)(?=\s+উপজেলা\s*[:：]|\n|$)",
-        "upazila": r"উপজেলা\s*[:：]?\s*(.+?)(?=\s+ইউনিয়ন\s*[:：]|\n|$)",
-        "union_name": r"ইউনিয়ন\s*[:：]?\s*(.+?)(?=\s+(?:ডাকঘর|পোস্টকোড|ভোটার এলাকার)\s*[:：]|\n|$)",
+        "upazila": r"উপজেলা\s*[:：]?\s*(.+?)(?=\s+(?:ইউনিয়ন|ইউনিয়ন)\s*[:：]|\n|$)",
+        "union_name": r"(?:ইউনিয়ন|ইউনিয়ন)\s*[:：]?\s*(.+?)(?=\s+(?:ডাকঘর|পোস্টকোড|ভোটার এলাকার)\s*[:：]|\n|$)",
         "post_code": r"(?:পোস্টকোড|ভোটার এলাকার কোড)\s*[:：]?\s*([০-৯0-9]+)",
-        "ward": r"(?:ওয়ার্ড|ওয়াড)\s*(?:নম্বর)?\s*[:：]?\s*([০-৯0-9]+)",
+        "ward": r"(?:ওয়ার্ড|ওয়ার্ড|ওয়াড)\s*(?:নম্বর)?\s*[:：]?\s*([০-৯0-9]+)",
         "address": r"ভোটার এলাকার নাম\s*[:：]?\s*(.+?)(?=\n|$)",
     }
     for field, pattern in patterns.items():
         m = re.search(pattern, text, flags=re.I | re.S)
         if m:
-            result[field] = normalize_field(m.group(1), field) if field not in {"post_code", "ward"} else clean(m.group(1))
+            result[field] = normalize_field(m.group(1), field)
     return result
 
 
@@ -285,16 +285,14 @@ def process_pdf(file_path, progress_callback=None):
             progress(page_number, total, "extracting voter records", len(results))
             page = doc[page_number - 1]
             page_records = native_records(page)
-            if visual_font_pdf:
+            page_used_ocr = False
+
+            if visual_font_pdf or not page_records or records_have_encoding_corruption(page_records):
                 ocr_records = ocr_fallback(page)
                 if ocr_records:
                     page_records = ocr_records
-                any_ocr = True
-            elif not page_records or records_have_encoding_corruption(page_records):
-                ocr_records = ocr_fallback(page)
-                if ocr_records:
-                    page_records = ocr_records
-                any_ocr = True
+                    page_used_ocr = True
+                    any_ocr = True
 
             for record in page_records:
                 for field in ("district", "upazila", "union_name", "ward", "post_code"):
@@ -303,8 +301,8 @@ def process_pdf(file_path, progress_callback=None):
                 if not record.get("address") and location.get("address"):
                     record["address"] = location["address"]
                 record["page_number"] = page_number
-                record["ocr_used"] = any_ocr
-                record["confidence"] = 0.90 if visual_font_pdf else (0.98 if not any_ocr else 0.75)
+                record["ocr_used"] = page_used_ocr
+                record["confidence"] = 0.90 if visual_font_pdf else (0.98 if not page_used_ocr else 0.75)
                 results.append(record)
             progress(page_number, total, "saving records", len(results))
 

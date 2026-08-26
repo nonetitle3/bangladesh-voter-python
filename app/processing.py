@@ -10,6 +10,7 @@ DIGITS = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
 BENGALI_CONSONANT = set("কখগঘঙচছজঝঞটঠডঢণতথদধনপফবভমযরলশষসহড়ঢ়য়ৎ")
 BENGALI_VOWEL_SIGNS = set("ািীুূৃেৈোৌ")
 PREBASE_SIGNS = set("িীেৈ")
+SUSPICIOUS_CHARS = set("ŐýƁƀƄƣËŘŞ×ĥėÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞß")
 
 
 def normalize(text):
@@ -65,6 +66,12 @@ def repair_bengali_matras(text):
     return "".join(out)
 
 
+def has_suspicious_encoding(text):
+    if not text:
+        return False
+    return any(ch in SUSPICIOUS_CHARS for ch in text)
+
+
 def repair(text):
     text = normalize(text)
     replacements = [
@@ -89,9 +96,6 @@ def repair(text):
     for old, new in replacements:
         text = text.replace(old, new)
 
-    # Some PDF ToUnicode maps collapse Bengali conjuncts/letters into
-    # unrelated Latin/extended characters. Only apply these mappings when
-    # they occur in the exact corrupted sequences we have observed.
     sequence_repairs = {
         "Ő": "ল্প",
         "ýুƁ": "কবু",
@@ -255,6 +259,14 @@ def ocr_fallback(page):
     return native_records(OCRPage())
 
 
+def records_have_encoding_corruption(records):
+    for record in records:
+        for field in ("name", "father_name", "mother_name", "address", "occupation", "district", "upazila", "union_name"):
+            if has_suspicious_encoding(record.get(field)):
+                return True
+    return False
+
+
 def process_pdf(file_path, progress_callback=None):
     results = []
     any_ocr = False
@@ -275,8 +287,15 @@ def process_pdf(file_path, progress_callback=None):
             progress(page_number, total, "extracting voter records", len(results))
             page = doc[page_number - 1]
             page_records = native_records(page)
-            if not page_records:
-                page_records = ocr_fallback(page)
+
+            # A PDF can contain selectable text but still have a broken
+            # ToUnicode map. In that case native extraction is worse than
+            # reading the visible Bengali glyphs. Re-OCR the page instead of
+            # trying to maintain an ever-growing character dictionary.
+            if not page_records or records_have_encoding_corruption(page_records):
+                ocr_records = ocr_fallback(page)
+                if ocr_records:
+                    page_records = ocr_records
                 any_ocr = True
 
             for record in page_records:

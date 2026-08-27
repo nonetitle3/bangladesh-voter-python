@@ -30,6 +30,10 @@ class Document(Base):
     total_pages = Column(Integer, default=0, nullable=False)
     current_stage = Column(String(100), default="queued", nullable=False)
     records_found = Column(Integer, default=0, nullable=False)
+    quality_score = Column(Float, nullable=True)
+    quality_status = Column(String(20), default="unknown", nullable=False)
+    quality_review_records = Column(Integer, default=0, nullable=False)
+    quality_report = Column(Text, nullable=True)
     records = relationship("VoterRecord", back_populates="document", cascade="all, delete-orphan")
 
 class VoterRecord(Base):
@@ -56,9 +60,15 @@ class VoterRecord(Base):
     page_number = Column(Integer)
     raw_text = Column(Text)
     confidence = Column(Float)
+    quality_score = Column(Float, nullable=True)
+    quality_status = Column(String(20), default="unknown", nullable=False, index=True)
+    quality_issues = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     document = relationship("Document", back_populates="records")
     __table_args__ = (
         Index("ix_voter_name_father", "name", "father_name"),
         Index("ix_voter_district_upazila", "district", "upazila"),
     )
+
+# Backward-compatible alias for code that imports the old FTS model name.
+VoterFTS = None

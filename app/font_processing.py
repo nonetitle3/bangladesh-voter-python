@@ -1,10 +1,20 @@
 import logging
-from pathlib import Path
 import fitz
-from .pdf_font_decoder import decoded_text, native_records, _location
-from .processing import ocr_fallback
+from .pdf_font_decoder import native_records, _location
+from .ocr_engine import ocr_page
 
 logger = logging.getLogger(__name__)
+
+
+def _ocr_records(page):
+    text, method = ocr_page(page)
+    from .processing import native_records as legacy_native_records
+
+    class OCRPage:
+        def get_text(self, mode="text"):
+            return text
+
+    return legacy_native_records(OCRPage()), method
 
 
 def process_pdf(file_path, progress_callback=None):
@@ -24,18 +34,19 @@ def process_pdf(file_path, progress_callback=None):
         progress(0, total, "opening PDF", 0)
 
         for page_number, page in enumerate(doc, start=1):
-            progress(page_number, total, "extracting native PDF text", len(results))
+            progress(page_number, total, "extracting native Bengali text", len(results))
             page_records = native_records(page)
             page_used_ocr = False
+            method = "native-font"
 
             if not page_records:
                 try:
-                    ocr_records = ocr_fallback(page)
+                    page_records, method = _ocr_records(page)
                 except Exception:
-                    logger.exception("OCR fallback failed on page %s", page_number)
-                    ocr_records = []
-                if ocr_records:
-                    page_records = ocr_records
+                    logger.exception("OCR failed on page %s", page_number)
+                    page_records = []
+
+                if page_records:
                     page_used_ocr = True
                     any_ocr = True
 
@@ -47,7 +58,8 @@ def process_pdf(file_path, progress_callback=None):
                     record["address"] = location["address"]
                 record["page_number"] = page_number
                 record["ocr_used"] = page_used_ocr
-                record["confidence"] = 0.98 if not page_used_ocr else 0.75
+                record["extraction_method"] = method
+                record["confidence"] = 0.98 if not page_used_ocr else (0.80 if method == "ocr-easyocr" else 0.72)
                 results.append(record)
 
             progress(page_number, total, "records extracted", len(results))

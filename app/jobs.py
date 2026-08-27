@@ -2,6 +2,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 from .models import Document, VoterRecord
 from .processing import process_pdf
+from .pdf_font_decoder import process_pdf as process_native_pdf
 
 
 def process_document(db: Session, document_id: int):
@@ -9,7 +10,9 @@ def process_document(db: Session, document_id: int):
     if not doc: return
     doc.status="processing"; db.commit()
     try:
-        records,ocr_used,pages=process_pdf(doc.stored_path)
+        # Prefer the font-aware native decoder. It avoids full-page OCR for
+        # readable Bengali text PDFs and falls back to OCR only when needed.
+        records,ocr_used,pages=process_native_pdf(doc.stored_path)
         doc.page_count=pages; doc.ocr_used=ocr_used
         for item in records:
             item.pop("ocr_used",None)

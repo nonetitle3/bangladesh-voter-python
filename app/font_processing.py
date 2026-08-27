@@ -25,11 +25,12 @@ def _ocr_records(page):
 def process_pdf(file_path, progress_callback=None):
     results = []
     any_ocr = False
+    total = 0
 
-    def progress(page, total, stage, records):
+    def progress(page, total_pages, stage, records):
         if progress_callback:
             try:
-                progress_callback(page, total, stage, records)
+                progress_callback(page, total_pages, stage, records)
             except Exception:
                 logger.exception("Progress callback failed")
 

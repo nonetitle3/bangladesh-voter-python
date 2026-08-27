@@ -1,9 +1,9 @@
-import os, shutil
+import os
 from pathlib import Path
 from fastapi import APIRouter, Depends, File, UploadFile, HTTPException, BackgroundTasks
 from fastapi.responses import Response
 from pydantic import BaseModel
-from sqlalchemy import func, inspect
+from sqlalchemy import func, inspect, text
 from sqlalchemy.orm import Session
 from .database import Base, engine, get_db, SessionLocal
 from .models import Document, VoterRecord
@@ -66,13 +66,14 @@ def _run_document(document_id):
 async def upload_pdfs(background_tasks:BackgroundTasks,files:list[UploadFile]=File(...),user=Depends(admin_user),db:Session=Depends(get_db)):
     created=[]
     for upload in files:
-        if not upload.filename.lower().endswith(".pdf"): continue
+        if not upload.filename or not upload.filename.lower().endswith(".pdf"): continue
         safe=Path(upload.filename).name; data=await upload.read(); target=UPLOAD_DIR/safe
         if target.exists(): target=UPLOAD_DIR/f"{Path(safe).stem}_{len(created)+1}.pdf"
         target.write_bytes(data)
         doc=Document(filename=safe,stored_path=str(target),pdf_data=data,status="processing",progress_percent=0,current_page=0,total_pages=0,current_stage="queued",records_found=0); db.add(doc); db.commit(); db.refresh(doc)
         background_tasks.add_task(_run_document,doc.id)
         created.append({"id":doc.id,"filename":safe,"status":"processing","progress_percent":0,"current_page":0,"total_pages":0,"records":0})
+    if not created: raise HTTPException(400,"No valid PDF files uploaded")
     return {"status":"ok","message":"PDF uploaded; extraction/OCR started in background","documents":created}
 
 @router.post("/admin/documents/{document_id}/reprocess")

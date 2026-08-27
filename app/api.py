@@ -3,13 +3,14 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, UploadFile, HTTPException, BackgroundTasks
 from fastapi.responses import Response
 from pydantic import BaseModel
-from sqlalchemy import func, or_, text, inspect
+from sqlalchemy import func, inspect
 from sqlalchemy.orm import Session
 from .database import Base, engine, get_db, SessionLocal
 from .models import Document, VoterRecord
 from .auth import admin_user, authenticate, ensure_admin, make_token
-from .processing import process_pdf
+from .font_processing import process_pdf
 from .exporter import query_records, csv_bytes, xlsx_bytes
+from .fts_search import search_records
 
 router=APIRouter(prefix="/api")
 UPLOAD_DIR=Path(os.getenv("UPLOAD_DIR","uploads")); UPLOAD_DIR.mkdir(parents=True,exist_ok=True)
@@ -72,7 +73,7 @@ async def upload_pdfs(background_tasks:BackgroundTasks,files:list[UploadFile]=Fi
         doc=Document(filename=safe,stored_path=str(target),pdf_data=data,status="processing",progress_percent=0,current_page=0,total_pages=0,current_stage="queued",records_found=0); db.add(doc); db.commit(); db.refresh(doc)
         background_tasks.add_task(_run_document,doc.id)
         created.append({"id":doc.id,"filename":safe,"status":"processing","progress_percent":0,"current_page":0,"total_pages":0,"records":0})
-    return {"status":"ok","message":"PDF uploaded; OCR started in background","documents":created}
+    return {"status":"ok","message":"PDF uploaded; extraction/OCR started in background","documents":created}
 
 @router.post("/admin/documents/{document_id}/reprocess")
 def reprocess_document(document_id:int,background_tasks:BackgroundTasks,user=Depends(admin_user),db:Session=Depends(get_db)):
@@ -80,7 +81,7 @@ def reprocess_document(document_id:int,background_tasks:BackgroundTasks,user=Dep
     if not doc: raise HTTPException(404,"Document not found")
     doc.status="reprocessing"; doc.progress_percent=0; doc.current_page=0; doc.total_pages=doc.page_count or 0; doc.current_stage="queued"; doc.records_found=0; doc.error_msg=None; db.commit()
     background_tasks.add_task(_run_document,doc.id)
-    return {"status":"ok","id":doc.id,"filename":doc.filename,"message":"Re-OCR started","progress_percent":0}
+    return {"status":"ok","id":doc.id,"filename":doc.filename,"message":"Reprocessing started","progress_percent":0}
 
 @router.delete("/admin/documents/{document_id}")
 def delete_document(document_id:int,user=Depends(admin_user),db:Session=Depends(get_db)):
@@ -99,16 +100,10 @@ def documents(user=Depends(admin_user),db:Session=Depends(get_db)):
 
 @router.get("/voter-search/search")
 def search(q:str|None=None,name:str|None=None,father_name:str|None=None,mother_name:str|None=None,voter_id:str|None=None,district:str|None=None,upazila:str|None=None,union_name:str|None=None,ward:str|None=None,occupation:str|None=None,gender:str|None=None,page:int=1,page_size:int=50,db:Session=Depends(get_db),user=Depends(admin_user)):
-    query=db.query(VoterRecord)
-    if q:
-        term=f"%{q}%"; query=query.filter(or_(VoterRecord.name.ilike(term),VoterRecord.father_name.ilike(term),VoterRecord.mother_name.ilike(term),VoterRecord.voter_id.ilike(term),VoterRecord.district.ilike(term),VoterRecord.address.ilike(term),VoterRecord.raw_text.ilike(term)))
-    for col,val in [(VoterRecord.name,name),(VoterRecord.father_name,father_name),(VoterRecord.mother_name,mother_name),(VoterRecord.voter_id,voter_id),(VoterRecord.district,district),(VoterRecord.upazila,upazila),(VoterRecord.union_name,union_name),(VoterRecord.ward,ward),(VoterRecord.occupation,occupation)]:
-        if val:
-            term=f"%{val}%"; query=query.filter(or_(col.ilike(term),VoterRecord.raw_text.ilike(term)))
-    if gender:
-        term=f"%{gender}%"; query=query.filter(or_(VoterRecord.gender.ilike(term),VoterRecord.raw_text.ilike(term)))
-    page=max(1,page); page_size=min(max(1,page_size),200); total=query.count(); rows=query.order_by(VoterRecord.id.desc()).offset((page-1)*page_size).limit(page_size).all(); cols=[c.name for c in VoterRecord.__table__.columns]
-    return {"records":[{c:getattr(r,c) for c in cols} for r in rows],"total_count":total,"page":page,"page_size":page_size}
+    filters={k:v for k,v in {"name":name,"father_name":father_name,"mother_name":mother_name,"voter_id":voter_id,"district":district,"upazila":upazila,"union_name":union_name,"ward":ward,"occupation":occupation,"gender":gender}.items() if v}
+    rows,total,fts_used=search_records(db,q,filters,page,page_size)
+    cols=[c.name for c in VoterRecord.__table__.columns]
+    return {"records":[{c:getattr(r,c) for c in cols} for r in rows],"total_count":total,"page":max(1,page),"page_size":min(max(1,page_size),200),"search_engine":"fts5" if fts_used else "like"}
 
 @router.get("/voter-search/stats")
 def stats(db:Session=Depends(get_db),user=Depends(admin_user)):

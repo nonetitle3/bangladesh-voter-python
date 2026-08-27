@@ -19,18 +19,7 @@ UPLOAD_DIR=Path(os.getenv("UPLOAD_DIR","uploads")); UPLOAD_DIR.mkdir(parents=Tru
 Base.metadata.create_all(bind=engine)
 try:
     columns={c["name"] for c in inspect(engine).get_columns("documents")}
-    wanted={
-        "pdf_data":"BYTEA" if engine.dialect.name=="postgresql" else "BLOB",
-        "progress_percent":"INTEGER DEFAULT 0",
-        "current_page":"INTEGER DEFAULT 0",
-        "total_pages":"INTEGER DEFAULT 0",
-        "current_stage":"VARCHAR(100) DEFAULT 'queued'",
-        "records_found":"INTEGER DEFAULT 0",
-        "quality_score":"DOUBLE PRECISION" if engine.dialect.name=="postgresql" else "FLOAT",
-        "quality_status":"VARCHAR(20) DEFAULT 'unknown'",
-        "quality_review_records":"INTEGER DEFAULT 0",
-        "quality_report":"TEXT",
-    }
+    wanted={"pdf_data":"BYTEA" if engine.dialect.name=="postgresql" else "BLOB","progress_percent":"INTEGER DEFAULT 0","current_page":"INTEGER DEFAULT 0","total_pages":"INTEGER DEFAULT 0","current_stage":"VARCHAR(100) DEFAULT 'queued'","records_found":"INTEGER DEFAULT 0","quality_score":"DOUBLE PRECISION" if engine.dialect.name=="postgresql" else "FLOAT","quality_status":"VARCHAR(20) DEFAULT 'unknown'","quality_review_records":"INTEGER DEFAULT 0","quality_report":"TEXT"}
     with engine.begin() as conn:
         for name,typ in wanted.items():
             if name not in columns: conn.execute(text(f"ALTER TABLE documents ADD COLUMN {name} {typ}"))
@@ -38,11 +27,7 @@ except Exception: pass
 
 try:
     columns={c["name"] for c in inspect(engine).get_columns("voter_records")}
-    wanted={
-        "quality_score":"DOUBLE PRECISION" if engine.dialect.name=="postgresql" else "FLOAT",
-        "quality_status":"VARCHAR(20) DEFAULT 'unknown'",
-        "quality_issues":"TEXT",
-    }
+    wanted={"quality_score":"DOUBLE PRECISION" if engine.dialect.name=="postgresql" else "FLOAT","quality_status":"VARCHAR(20) DEFAULT 'unknown'","quality_issues":"TEXT"}
     with engine.begin() as conn:
         for name,typ in wanted.items():
             if name not in columns: conn.execute(text(f"ALTER TABLE voter_records ADD COLUMN {name} {typ}"))
@@ -76,22 +61,19 @@ def _run_document(document_id):
         doc.status="processing"; doc.progress_percent=0; doc.current_page=0; doc.current_stage="opening PDF"; doc.records_found=0; doc.quality_score=None; doc.quality_status="unknown"; doc.quality_review_records=0; doc.quality_report=None; db.commit()
         def cb(page,total,stage,records): _set_progress(db,doc,page,total,stage,records)
         records,ocr,pages=process_pdf(path,progress_callback=cb)
-        _set_progress(db,doc,pages,pages,'validating extraction quality',len(records))
+        _set_progress(db,doc,pages,pages,"validating extraction quality",len(records))
         quality=document_quality(records)
         for r in records:
             qr=merge_confidence(r)
-            r["quality_score"]=qr.score
-            r["quality_status"]=qr.status
-            r["quality_issues"]=json.dumps(list(qr.issues),ensure_ascii=False)
-        _set_progress(db,doc,pages,pages,'saving records',len(records))
+            r["quality_score"]=qr.score; r["quality_status"]=qr.status; r["quality_issues"]=json.dumps(list(qr.issues),ensure_ascii=False)
+        _set_progress(db,doc,pages,pages,"saving records",len(records))
         db.query(VoterRecord).filter(VoterRecord.document_id==doc.id).delete(synchronize_session=False)
         for r in records:
             r.pop("ocr_used",None); r.update(document_id=doc.id,pdf_filename=doc.filename); db.add(VoterRecord(**r))
         doc.page_count=pages; doc.ocr_used=ocr; doc.status="completed"; doc.error_msg=None; doc.progress_percent=100; doc.current_page=pages; doc.total_pages=pages; doc.current_stage="completed"; doc.records_found=len(records); doc.quality_score=quality["average_score"]; doc.quality_review_records=quality["review_records"]; doc.quality_status=quality["status"]; doc.quality_report=json.dumps(quality,ensure_ascii=False); db.commit()
     except Exception as e:
         db.rollback(); doc=db.get(Document,document_id)
-        if doc:
-            doc.status="failed"; doc.error_msg=str(e)[:2000]; doc.current_stage="failed"; db.commit()
+        if doc: doc.status="failed"; doc.error_msg=str(e)[:2000]; doc.current_stage="failed"; db.commit()
     finally: db.close()
 
 @router.post("/admin/upload-pdf")
@@ -129,7 +111,7 @@ def delete_document(document_id:int,user=Depends(admin_user),db:Session=Depends(
 @router.get("/admin/documents")
 def documents(user=Depends(admin_user),db:Session=Depends(get_db)):
     docs=db.query(Document).order_by(Document.uploaded_at.desc()).limit(100).all()
-    return [{"id":d.id,"filename":d.filename,"page_count":d.page_count,"status":d.status,"ocr_used":d.ocr_used,"error_msg":d.error_msg,"uploaded_at":d.uploaded_at,"has_pdf":bool(d.pdf_data) or bool(d.stored_path and Path(d.stored_path).exists()),"progress_percent":getattr(d,'progress_percent',0) or 0,"current_page":getattr(d,'current_page',0) or 0,"total_pages":getattr(d,'total_pages',0) or 0,"current_stage":getattr(d,'current_stage','queued') or 'queued',"records_found":getattr(d,'records_found',0) or 0,"quality_score":getattr(d,'quality_score',None),"quality_status":getattr(d,'quality_status','unknown'),"quality_review_records":getattr(d,'quality_review_records',0) or 0} for d in docs]
+    return [{"id":d.id,"filename":d.filename,"page_count":d.page_count,"status":d.status,"ocr_used":d.ocr_used,"error_msg":d.error_msg,"uploaded_at":d.uploaded_at,"has_pdf":bool(d.pdf_data) or bool(d.stored_path and Path(d.stored_path).exists()),"progress_percent":getattr(d,"progress_percent",0) or 0,"current_page":getattr(d,"current_page",0) or 0,"total_pages":getattr(d,"total_pages",0) or 0,"current_stage":getattr(d,"current_stage","queued") or "queued","records_found":getattr(d,"records_found",0) or 0,"quality_score":getattr(d,"quality_score",None),"quality_status":getattr(d,"quality_status","unknown"),"quality_review_records":getattr(d,"quality_review_records",0) or 0} for d in docs]
 
 @router.get("/admin/documents/{document_id}/quality")
 def document_quality_report(document_id:int,user=Depends(admin_user),db:Session=Depends(get_db)):
@@ -152,7 +134,7 @@ def review_records(limit:int=100,offset:int=0,user=Depends(admin_user),db:Sessio
     return {"total_count":total,"records":[{"id":r.id,"document_id":r.document_id,"pdf_filename":r.pdf_filename,"page_number":r.page_number,"name":r.name,"voter_id":r.voter_id,"father_name":r.father_name,"mother_name":r.mother_name,"quality_score":r.quality_score,"quality_status":r.quality_status,"quality_issues":json.loads(r.quality_issues) if r.quality_issues else []} for r in rows]}
 
 @router.get("/voter-search/search")
-def search(q:str|None=None,name:str|None=None,father_name:str|None=None,mother_name:str|None=None,voter_id:str|None=None,district:str|None=None,upazila:str|None=None,union_name:str|None=None,ward:str|None,occupation:str|None=None,gender:str|None=None,page:int=1,page_size:int=50,db:Session=Depends(get_db),user=Depends(admin_user)):
+def search(q:str|None=None,name:str|None=None,father_name:str|None=None,mother_name:str|None=None,voter_id:str|None=None,district:str|None=None,upazila:str|None=None,union_name:str|None=None,ward:str|None=None,occupation:str|None=None,gender:str|None=None,page:int=1,page_size:int=50,db:Session=Depends(get_db),user=Depends(admin_user)):
     filters={k:v for k,v in {"name":name,"father_name":father_name,"mother_name":mother_name,"voter_id":voter_id,"district":district,"upazila":upazila,"union_name":union_name,"ward":ward,"occupation":occupation,"gender":gender}.items() if v}
     rows,total,fts_used=search_records(db,q,filters,page,page_size)
     cols=[c.name for c in VoterRecord.__table__.columns]

@@ -1,20 +1,26 @@
 import logging
+from pathlib import Path
 import fitz
+import pdfplumber
 from .pdf_font_decoder import native_records, _location
 from .ocr_engine import ocr_page
 
 logger = logging.getLogger(__name__)
 
 
-def _ocr_records(page):
-    text, method = ocr_page(page)
+def _records_from_text(text):
     from .processing import native_records as legacy_native_records
 
-    class OCRPage:
+    class TextPage:
         def get_text(self, mode="text"):
-            return text
+            return text or ""
 
-    return legacy_native_records(OCRPage()), method
+    return legacy_native_records(TextPage())
+
+
+def _ocr_records(page):
+    text, method = ocr_page(page)
+    return _records_from_text(text), method
 
 
 def process_pdf(file_path, progress_callback=None):
@@ -33,6 +39,7 @@ def process_pdf(file_path, progress_callback=None):
         location = _location(doc)
         progress(0, total, "opening PDF", 0)
 
+        plumber_pages = None
         for page_number, page in enumerate(doc, start=1):
             progress(page_number, total, "extracting native Bengali text", len(results))
             page_records = native_records(page)
@@ -41,11 +48,21 @@ def process_pdf(file_path, progress_callback=None):
 
             if not page_records:
                 try:
+                    if plumber_pages is None:
+                        plumber_pages = pdfplumber.open(str(file_path)).pages
+                    plumber_text = plumber_pages[page_number - 1].extract_text(x_tolerance=2, y_tolerance=3) or ""
+                    page_records = _records_from_text(plumber_text)
+                    method = "pdfplumber"
+                except Exception:
+                    logger.exception("pdfplumber fallback failed on page %s", page_number)
+                    page_records = []
+
+            if not page_records:
+                try:
                     page_records, method = _ocr_records(page)
                 except Exception:
                     logger.exception("OCR failed on page %s", page_number)
                     page_records = []
-
                 if page_records:
                     page_used_ocr = True
                     any_ocr = True
@@ -59,10 +76,13 @@ def process_pdf(file_path, progress_callback=None):
                 record["page_number"] = page_number
                 record["ocr_used"] = page_used_ocr
                 record["extraction_method"] = method
-                record["confidence"] = 0.98 if not page_used_ocr else (0.80 if method == "ocr-easyocr" else 0.72)
+                record["confidence"] = 0.98 if method == "native-font" else (0.94 if method == "pdfplumber" else (0.80 if method == "ocr-easyocr" else 0.72))
                 results.append(record)
 
             progress(page_number, total, "records extracted", len(results))
+
+        if plumber_pages is not None:
+            plumber_pages[0].pdf.stream.close() if False else None
 
     progress(total, total, "completed", len(results))
     return results, any_ocr, total

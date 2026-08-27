@@ -3,26 +3,22 @@ import fitz
 import pdfplumber
 from .pdf_font_decoder import native_records, _location
 from .ocr_engine import ocr_page
+from . import processing as base
 
 logger = logging.getLogger(__name__)
 
 
 def _records_from_text(text):
-    from .processing import native_records as legacy_native_records
-
+    """Parse text produced by pdfplumber/OCR using the existing parser."""
     class TextPage:
         def get_text(self, mode="text"):
             return text or ""
 
-    return legacy_native_records(TextPage())
-
-
-def _ocr_records(page):
-    text, method = ocr_page(page)
-    return _records_from_text(text), method
+    return base.native_records(TextPage())
 
 
 def process_pdf(file_path, progress_callback=None):
+    """Extract records with native-font, pdfplumber, then OCR fallback."""
     results = []
     any_ocr = False
     total = 0
@@ -51,22 +47,26 @@ def process_pdf(file_path, progress_callback=None):
                     try:
                         if plumber_doc is None:
                             plumber_doc = pdfplumber.open(str(file_path))
-                        plumber_text = plumber_doc.pages[page_number - 1].extract_text(x_tolerance=2, y_tolerance=3) or ""
-                        page_records = _records_from_text(plumber_text)
-                        method = "pdfplumber"
+                        plumber_text = plumber_doc.pages[page_number - 1].extract_text(
+                            x_tolerance=2,
+                            y_tolerance=3,
+                        ) or ""
+                        if plumber_text.strip():
+                            page_records = _records_from_text(plumber_text)
+                            method = "pdfplumber"
                     except Exception:
                         logger.exception("pdfplumber fallback failed on page %s", page_number)
-                        page_records = []
 
                 if not page_records:
                     try:
-                        page_records, method = _ocr_records(page)
+                        ocr_text, ocr_method = ocr_page(page)
+                        if ocr_text.strip():
+                            page_records = _records_from_text(ocr_text)
+                            method = ocr_method
+                            page_used_ocr = bool(page_records)
+                            any_ocr = any_ocr or page_used_ocr
                     except Exception:
-                        logger.exception("OCR failed on page %s", page_number)
-                        page_records = []
-                    if page_records:
-                        page_used_ocr = True
-                        any_ocr = True
+                        logger.exception("OCR fallback failed on page %s", page_number)
 
                 for record in page_records:
                     for field in ("district", "upazila", "union_name", "ward", "post_code"):
@@ -77,7 +77,12 @@ def process_pdf(file_path, progress_callback=None):
                     record["page_number"] = page_number
                     record["ocr_used"] = page_used_ocr
                     record["extraction_method"] = method
-                    record["confidence"] = 0.98 if method == "native-font" else (0.94 if method == "pdfplumber" else (0.80 if method == "ocr-easyocr" else 0.72))
+                    record["confidence"] = {
+                        "native-font": 0.98,
+                        "pdfplumber": 0.94,
+                        "ocr-easyocr": 0.80,
+                        "ocr-tesseract": 0.72,
+                    }.get(method, 0.70)
                     results.append(record)
 
                 progress(page_number, total, "records extracted", len(results))

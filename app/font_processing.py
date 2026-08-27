@@ -1,5 +1,4 @@
 import logging
-from pathlib import Path
 import fitz
 import pdfplumber
 from .pdf_font_decoder import native_records, _location
@@ -34,55 +33,56 @@ def process_pdf(file_path, progress_callback=None):
             except Exception:
                 logger.exception("Progress callback failed")
 
-    with fitz.open(file_path) as doc:
-        total = len(doc)
-        location = _location(doc)
-        progress(0, total, "opening PDF", 0)
+    plumber_doc = None
+    try:
+        with fitz.open(file_path) as doc:
+            total = len(doc)
+            location = _location(doc)
+            progress(0, total, "opening PDF", 0)
 
-        plumber_pages = None
-        for page_number, page in enumerate(doc, start=1):
-            progress(page_number, total, "extracting native Bengali text", len(results))
-            page_records = native_records(page)
-            page_used_ocr = False
-            method = "native-font"
+            for page_number, page in enumerate(doc, start=1):
+                progress(page_number, total, "extracting native Bengali text", len(results))
+                page_records = native_records(page)
+                page_used_ocr = False
+                method = "native-font"
 
-            if not page_records:
-                try:
-                    if plumber_pages is None:
-                        plumber_pages = pdfplumber.open(str(file_path)).pages
-                    plumber_text = plumber_pages[page_number - 1].extract_text(x_tolerance=2, y_tolerance=3) or ""
-                    page_records = _records_from_text(plumber_text)
-                    method = "pdfplumber"
-                except Exception:
-                    logger.exception("pdfplumber fallback failed on page %s", page_number)
-                    page_records = []
+                if not page_records:
+                    try:
+                        if plumber_doc is None:
+                            plumber_doc = pdfplumber.open(str(file_path))
+                        plumber_text = plumber_doc.pages[page_number - 1].extract_text(x_tolerance=2, y_tolerance=3) or ""
+                        page_records = _records_from_text(plumber_text)
+                        method = "pdfplumber"
+                    except Exception:
+                        logger.exception("pdfplumber fallback failed on page %s", page_number)
+                        page_records = []
 
-            if not page_records:
-                try:
-                    page_records, method = _ocr_records(page)
-                except Exception:
-                    logger.exception("OCR failed on page %s", page_number)
-                    page_records = []
-                if page_records:
-                    page_used_ocr = True
-                    any_ocr = True
+                if not page_records:
+                    try:
+                        page_records, method = _ocr_records(page)
+                    except Exception:
+                        logger.exception("OCR failed on page %s", page_number)
+                        page_records = []
+                    if page_records:
+                        page_used_ocr = True
+                        any_ocr = True
 
-            for record in page_records:
-                for field in ("district", "upazila", "union_name", "ward", "post_code"):
-                    if not record.get(field) and location.get(field):
-                        record[field] = location[field]
-                if not record.get("address") and location.get("address"):
-                    record["address"] = location["address"]
-                record["page_number"] = page_number
-                record["ocr_used"] = page_used_ocr
-                record["extraction_method"] = method
-                record["confidence"] = 0.98 if method == "native-font" else (0.94 if method == "pdfplumber" else (0.80 if method == "ocr-easyocr" else 0.72))
-                results.append(record)
+                for record in page_records:
+                    for field in ("district", "upazila", "union_name", "ward", "post_code"):
+                        if not record.get(field) and location.get(field):
+                            record[field] = location[field]
+                    if not record.get("address") and location.get("address"):
+                        record["address"] = location["address"]
+                    record["page_number"] = page_number
+                    record["ocr_used"] = page_used_ocr
+                    record["extraction_method"] = method
+                    record["confidence"] = 0.98 if method == "native-font" else (0.94 if method == "pdfplumber" else (0.80 if method == "ocr-easyocr" else 0.72))
+                    results.append(record)
 
-            progress(page_number, total, "records extracted", len(results))
-
-        if plumber_pages is not None:
-            plumber_pages[0].pdf.stream.close() if False else None
+                progress(page_number, total, "records extracted", len(results))
+    finally:
+        if plumber_doc is not None:
+            plumber_doc.close()
 
     progress(total, total, "completed", len(results))
     return results, any_ocr, total

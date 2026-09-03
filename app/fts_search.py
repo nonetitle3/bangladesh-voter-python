@@ -2,8 +2,6 @@ from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
 from .models import VoterRecord
 
-DIGITS = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
-
 SEARCH_COLUMNS = (
     VoterRecord.name, VoterRecord.father_name, VoterRecord.mother_name,
     VoterRecord.voter_id, VoterRecord.district, VoterRecord.upazila,
@@ -15,7 +13,7 @@ SEARCH_COLUMNS = (
 
 def prepare_fts_query(value: str) -> str:
     tokens = []
-    for token in value.translate(DIGITS).strip().split():
+    for token in value.strip().split():
         token = token.replace('"', '').replace("'", '')
         if token:
             tokens.append(f'"{token}"*')
@@ -24,11 +22,6 @@ def prepare_fts_query(value: str) -> str:
 
 def search_records(db: Session, q=None, filters=None, page=1, page_size=50):
     filters = filters or {}
-    filters = {
-        column: value.translate(DIGITS) if isinstance(value, str) else value
-        for column, value in filters.items()
-    }
-    q = q.translate(DIGITS) if isinstance(q, str) else q
     page = max(1, page)
     page_size = min(max(1, page_size), 200)
 

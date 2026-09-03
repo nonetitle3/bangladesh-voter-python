@@ -33,17 +33,8 @@ def tesseract_page(page):
     pix = page.get_pixmap(dpi=180, alpha=False)
     image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
     image = ImageEnhance.Contrast(ImageOps.grayscale(image)).enhance(1.25)
-    try:
-        languages = set(pytesseract.get_languages(config=""))
-    except Exception:
-        languages = set()
-    lang = "ben+eng" if {"ben", "eng"}.issubset(languages) else "eng"
-    outputs = []
-    for psm in (6, 11):
-        text = pytesseract.image_to_string(image, lang=lang, config=f"--psm {psm}")
-        if text.strip() and text not in outputs:
-            outputs.append(text)
-    return "\n".join(outputs)
+    text = pytesseract.image_to_string(image, lang="ben+eng", config="--psm 6")
+    return text
 
 
 def ocr_page(page):

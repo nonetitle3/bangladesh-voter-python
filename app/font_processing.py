@@ -2,7 +2,7 @@ import logging
 import fitz
 import pdfplumber
 from .pdf_font_decoder import native_records, _location
-from .ocr_engine import easyocr_page, tesseract_page
+from .ocr_engine import ocr_page
 from . import processing as base
 
 logger = logging.getLogger(__name__)
@@ -58,22 +58,15 @@ def process_pdf(file_path, progress_callback=None):
                         logger.exception("pdfplumber fallback failed on page %s", page_number)
 
                 if not page_records:
-                    ocr_candidates = []
-                    for ocr_method, reader in (
-                        ("ocr-easyocr", easyocr_page),
-                        ("ocr-tesseract", tesseract_page),
-                    ):
-                        try:
-                            ocr_text = reader(page)
-                            candidate_records = _records_from_text(ocr_text)
-                            if candidate_records:
-                                ocr_candidates.append((len(candidate_records), ocr_method, candidate_records))
-                        except Exception:
-                            logger.exception("%s failed on page %s", ocr_method, page_number)
-                    if ocr_candidates:
-                        _, method, page_records = max(ocr_candidates, key=lambda candidate: candidate[0])
-                        page_used_ocr = True
-                        any_ocr = True
+                    try:
+                        ocr_text, ocr_method = ocr_page(page)
+                        if ocr_text.strip():
+                            page_records = _records_from_text(ocr_text)
+                            method = ocr_method
+                            page_used_ocr = bool(page_records)
+                            any_ocr = any_ocr or page_used_ocr
+                    except Exception:
+                        logger.exception("OCR fallback failed on page %s", page_number)
 
                 for record in page_records:
                     for field in ("district", "upazila", "union_name", "ward", "post_code"):

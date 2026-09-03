@@ -5,13 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#059669" />
     <title>ভোটার তথ্য অনুসন্ধান</title>
+    <style>
+      html,body,#root{margin:0;min-height:100%;width:100%}body{font-family:Arial,"Noto Sans Bengali",sans-serif;background:#f5f7fb;color:#172033}.app-shell{min-height:100vh;display:flex}.sidebar{width:250px;flex:0 0 250px;background:#0f172a;color:#fff;display:flex;flex-direction:column;position:sticky;top:0;height:100vh}.sidebar-brand{padding:22px 18px;border-bottom:1px solid #334155}.sidebar-brand strong,.sidebar-brand small,.admin-badge strong,.admin-badge small{display:block}.sidebar-brand small,.admin-badge small{color:#94a3b8;font-size:11px}.sidebar nav{padding:14px 10px;display:grid;gap:5px}.sidebar nav button,.sidebar-bottom>button{border:0;background:transparent;color:#cbd5e1;text-align:left;border-radius:9px;padding:11px 13px;display:flex;gap:12px;align-items:center;cursor:pointer}.sidebar nav button.selected{background:#1e293b;color:#fff}.main-shell{min-width:0;flex:1}.topbar{height:64px;background:#fff;border-bottom:1px solid #e2e8f0;display:flex;align-items:center;justify-content:space-between;padding:0 24px}.content{max-width:1450px;margin:auto;padding:25px}.panel{background:#fff;border:1px solid #dbe3ec;border-radius:14px;padding:20px;margin-bottom:16px}.stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}.stat-card{background:#fff;border:1px solid #dbe3ec;border-radius:14px;padding:17px;display:flex;gap:13px}.primary{background:#059669;color:#fff;border:0;border-radius:9px;padding:10px 16px;cursor:pointer}.secondary{background:#eef2f7;color:#334155;border:0;border-radius:9px;padding:10px 16px;cursor:pointer}.login-shell{min-height:100vh;display:grid;place-items:center}.login-card{width:min(430px,90%);background:#fff;border:1px solid #dbe3ec;border-radius:18px;padding:30px}@media(max-width:700px){.sidebar{position:fixed;left:-260px;z-index:20}.sidebar.open{left:0}.mobile-menu{display:block}.stats-grid{grid-template-columns:1fr 1fr}.content{padding:12px}}
+    </style>
     <script>
       (function () {
         var params = new URLSearchParams(window.location.search);
         var redirect = params.get('p');
-        if (redirect) {
-          window.history.replaceState(null, '', '/bangladesh-voter-python' + decodeURIComponent(redirect));
-        }
+        if (redirect) window.history.replaceState(null, '', '/bangladesh-voter-python' + decodeURIComponent(redirect));
       })();
     </script>
   </head>
